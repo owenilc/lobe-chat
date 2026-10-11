@@ -21,6 +21,17 @@ export interface AgentEventLlmResult {
   type: 'llm_result';
 }
 
+export interface AgentEventStreamRetry {
+  data: {
+    attempt: number;
+    delayMs: number;
+    errorType?: string;
+    kind?: string;
+    maxAttempts: number;
+  };
+  type: 'stream_retry';
+}
+
 export interface AgentEventToolPending {
   toolCalls: ToolsCalling[];
   type: 'tool_pending';
@@ -66,6 +77,7 @@ export type FinishReason =
   | 'cost_limit_exceeded' // Reached cost limit
   | 'timeout' // Execution timeout
   | 'agent_decision' // Agent decided to finish
+  | 'queued_message_interrupt' // Soft interrupt: user queued a message during execution
   | 'error_recovery' // Finished due to unrecoverable error
   | 'system_shutdown'; // System is shutting down
 
@@ -119,6 +131,7 @@ export type AgentEvent =
   | AgentEventLlmStart
   | AgentEventLlmStream
   | AgentEventLlmResult
+  | AgentEventStreamRetry
   // Tool invocation
   | AgentEventToolPending
   | AgentEventToolResult

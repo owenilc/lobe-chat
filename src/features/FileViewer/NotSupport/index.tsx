@@ -1,4 +1,5 @@
-import { Button, Center, Flexbox, FluentEmoji } from '@lobehub/ui';
+import { Center, Flexbox, FluentEmoji } from '@lobehub/ui';
+import { Button } from '@lobehub/ui/base-ui';
 import { createStaticStyles } from 'antd-style';
 import { type ComponentType, type CSSProperties } from 'react';
 import { useState } from 'react';
@@ -22,10 +23,12 @@ const styles = createStaticStyles(({ css, cssVar }) => ({
 interface NotSupportProps {
   fileName?: string;
   style?: CSSProperties;
+  /** Explain a bounded-preview limit instead of claiming the format is unsupported. */
+  tooLarge?: boolean;
   url?: string | null;
 }
 
-const NotSupport: ComponentType<NotSupportProps> = ({ fileName, url, style }) => {
+const NotSupport: ComponentType<NotSupportProps> = ({ fileName, url, style, tooLarge }) => {
   const { t } = useTranslation('file');
   const [loading, setLoading] = useState(false);
 
@@ -35,17 +38,24 @@ const NotSupport: ComponentType<NotSupportProps> = ({ fileName, url, style }) =>
         <Flexbox align={'center'} gap={12}>
           <FluentEmoji emoji={'👀'} size={64} />
           <Flexbox style={{ textAlign: 'center' }}>
-            <Trans i18nKey="preview.unsupportedFileAndContact" ns={'file'}>
-              此文件格式暂不支持在线预览，如有预览诉求，欢迎
-              <a
-                aria-label={'todo'}
-                href={MORE_FILE_PREVIEW_REQUEST_URL}
-                rel="noreferrer"
-                target="_blank"
-              >
-                反馈给我们
-              </a>
-            </Trans>
+            {tooLarge ? (
+              t('preview.tooLarge')
+            ) : (
+              <Trans
+                i18nKey="preview.unsupportedFileAndContact"
+                ns={'file'}
+                components={[
+                  <span key="0" />,
+                  <a
+                    aria-label={'todo'}
+                    href={MORE_FILE_PREVIEW_REQUEST_URL}
+                    key="1"
+                    rel="noreferrer"
+                    target="_blank"
+                  />,
+                ]}
+              />
+            )}
           </Flexbox>
           {url && (
             <Button

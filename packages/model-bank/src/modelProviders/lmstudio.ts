@@ -1,4 +1,4 @@
-import type { ModelProviderCard } from '@/types/llm';
+import type { ModelProviderCard } from '../types';
 
 // ref: https://ollama.com/library
 const LMStudio: ModelProviderCard = {
@@ -17,7 +17,6 @@ const LMStudio: ModelProviderCard = {
       speed: 2,
       text: 'smooth',
     },
-    showApiKey: false,
     showModelFetcher: true,
   },
   url: 'https://lmstudio.ai',

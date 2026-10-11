@@ -3,6 +3,7 @@ import type OpenAI from 'openai';
 import type { Stream } from 'openai/streaming';
 
 import { AgentRuntimeErrorType } from '../../../types/error';
+import { serializeScopedSignature } from '../../../utils/signatureScope';
 import { convertOpenAIResponseUsage } from '../../usageConverters';
 import type {
   ChatPayloadForTransformStream,
@@ -21,9 +22,21 @@ import {
 } from '../protocol';
 import type { OpenAIStreamOptions } from './openai';
 
+const toResponsesError = (error: { code?: string | null; message?: string | null }) =>
+  ({
+    body: error,
+    message: error.message || error.code || 'The provider reported an error mid-stream.',
+    type: AgentRuntimeErrorType.ProviderBizError,
+  }) satisfies ChatMessageError;
+
 const transformOpenAIStream = (
   chunk:
     | OpenAI.Responses.ResponseStreamEvent
+    | {
+        delta: string;
+        item_id: string;
+        type: 'response.reasoning_text.delta';
+      }
     | {
         annotation: {
           end_index: number;
@@ -127,12 +140,14 @@ const transformOpenAIStream = (
         }
       }
 
-      case 'response.reasoning_summary_text.delta': {
+      case 'response.reasoning_summary_text.delta':
+      case 'response.reasoning_text.delta': {
         return { data: chunk.delta, id: chunk.item_id, type: 'reasoning' };
       }
 
       case 'response.output_text.annotation.added': {
-        const citations = chunk.annotation;
+        // OpenAI SDK v6 types the annotation payload as `unknown`; narrow to the URL-citation shape we read.
+        const citations = chunk.annotation as { title?: string; url?: string };
 
         if (streamContext.returnedCitationArray) {
           streamContext.returnedCitationArray.push({
@@ -145,6 +160,47 @@ const transformOpenAIStream = (
       }
 
       case 'response.output_item.done': {
+        if (chunk.item.type === 'reasoning') {
+          const scopedEncryptedContent = chunk.item.encrypted_content
+            ? serializeScopedSignature(
+                chunk.item.encrypted_content,
+                payload?.reasoningSignatureScope,
+                'reasoning',
+              )
+            : undefined;
+          const hasSummaryText = chunk.item.summary?.some(({ text }) => !!text);
+
+          // Encrypted reasoning without a verifiable scope stays fail-closed (#17694):
+          // never expose the raw provider payload to persistence.
+          if (!scopedEncryptedContent && !hasSummaryText)
+            return { data: null, id: chunk.item.id, type: 'text' };
+
+          const chunks: StreamProtocolChunk[] = [
+            {
+              data: {
+                ...chunk.item,
+                encrypted_content: scopedEncryptedContent,
+              },
+              id: chunk.item.id,
+              type: 'reasoning_response_item',
+            },
+          ];
+
+          /**
+           * Dual-emit the scope-serialized payload on the legacy string-only event so
+           * already-released clients keep single-item reasoning continuation. New clients
+           * prefer `responseItems` on replay, so the redundancy is harmless.
+           */
+          if (scopedEncryptedContent)
+            chunks.push({
+              data: scopedEncryptedContent,
+              id: chunk.item.id,
+              type: 'reasoning_signature',
+            });
+
+          return chunks;
+        }
+
         if (streamContext.returnedCitationArray?.length) {
           return {
             data: { citations: streamContext.returnedCitationArray },
@@ -158,6 +214,7 @@ const transformOpenAIStream = (
 
       case 'response.completed': {
         if (chunk.response.usage) {
+          delete streamContext.usageMissingDiagnostics;
           return {
             data: convertOpenAIResponseUsage(chunk.response.usage, payload),
             id: chunk.response.id,
@@ -165,7 +222,71 @@ const transformOpenAIStream = (
           };
         }
 
+        streamContext.usageMissingDiagnostics = {
+          apiMode: 'responses',
+          hasUsageMetadata: false,
+          includeUsageRequested: payload?.includeUsageRequested,
+          model: payload?.model,
+          provider: payload?.provider,
+          responseId: chunk.response.id,
+          source: 'openai_responses',
+          terminalEventType: chunk.type,
+          terminalStatus: chunk.response.status,
+        };
+
         return { data: chunk, id: streamContext.id, type: 'data' };
+      }
+
+      /**
+       * Terminal failure events. Passing them through as plain `data` let the stream close
+       * normally with no content, no usage and no finish reason, so a failed or rate-limited
+       * response was reported as an empty completion — non-retryable, and without the
+       * upstream's own explanation.
+       */
+      case 'response.failed': {
+        const { error, usage } = chunk.response;
+        const failure = toResponsesError(
+          error ?? { message: 'The provider reported the response as failed.' },
+        );
+        const failureChunk = { data: failure, id: streamContext.id, type: 'error' } as const;
+        if (!usage) return failureChunk;
+
+        return [
+          {
+            data: convertOpenAIResponseUsage(usage, payload),
+            id: streamContext.id,
+            type: 'usage',
+          },
+          failureChunk,
+        ];
+      }
+
+      case 'error': {
+        return { data: toResponsesError(chunk), id: streamContext.id, type: 'error' };
+      }
+
+      /**
+       * An incomplete response is still billed. Surface its usage and reason so a turn that hit
+       * `max_output_tokens` during reasoning reads as a length stop rather than an unbilled drop.
+       */
+      case 'response.incomplete': {
+        const { incomplete_details, usage } = chunk.response;
+        const reason = incomplete_details?.reason;
+        const stopChunk = {
+          data: reason === 'max_output_tokens' ? 'length' : (reason ?? 'incomplete'),
+          id: streamContext.id,
+          type: 'stop',
+        } as const;
+        if (!usage) return stopChunk;
+
+        return [
+          {
+            data: convertOpenAIResponseUsage(usage, payload),
+            id: streamContext.id,
+            type: 'usage',
+          },
+          stopChunk,
+        ];
       }
 
       default: {
@@ -205,7 +326,9 @@ export const OpenAIResponsesStream = (
   const streamStack: StreamContext = { id: '' };
 
   const readableStream =
-    stream instanceof ReadableStream ? stream : convertIterableToStream(stream);
+    stream instanceof ReadableStream
+      ? stream
+      : convertIterableToStream(stream, { model: payload?.model, provider: payload?.provider });
 
   // use closure to pass payload to transformOpenAIStream
   const transformWithPayload: typeof transformOpenAIStream = (chunk, streamContext) =>
@@ -225,6 +348,6 @@ export const OpenAIResponsesStream = (
         }),
       )
       .pipeThrough(createSSEProtocolTransformer((c) => c, streamStack))
-      .pipeThrough(createCallbacksTransformer(callbacks))
+      .pipeThrough(createCallbacksTransformer(callbacks, { streamStack }))
   );
 };

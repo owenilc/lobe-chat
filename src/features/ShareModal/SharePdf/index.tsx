@@ -1,7 +1,7 @@
 import { type UIChatMessage } from '@lobechat/types';
-import { type FormItemProps } from '@lobehub/ui';
-import { Button, Flexbox, Form } from '@lobehub/ui';
-import { App, Switch } from 'antd';
+import { Flexbox } from '@lobehub/ui';
+import { Button, Switch, toast } from '@lobehub/ui/base-ui';
+import { Form, type FormFieldProps, useForm } from '@lobehub/ui/base-ui/form';
 import { cx } from 'antd-style';
 import { DownloadIcon, FileText } from 'lucide-react';
 import { memo, useState } from 'react';
@@ -29,20 +29,22 @@ const DEFAULT_FIELD_VALUE: FieldType = {
 
 const SharePdf = memo((props: { message?: UIChatMessage }) => {
   const [fieldValue, setFieldValue] = useState(DEFAULT_FIELD_VALUE);
+  const form = useForm({
+    initialValues: DEFAULT_FIELD_VALUE,
+    onValuesChange: (_, allValues) => setFieldValue(allValues),
+  });
   const { t } = useTranslation(['chat', 'common']);
-  const { message } = App.useApp();
 
   const { message: outerMessage } = props;
   const isMobile = useIsMobile();
 
-  const settings: FormItemProps[] = [
+  const settings: FormFieldProps<FieldType>[] = [
     {
       children: <Switch />,
       label: t('shareModal.withSystemRole'),
       layout: 'horizontal',
       minWidth: undefined,
       name: 'withSystemRole',
-      valuePropName: 'checked',
     },
     {
       children: <Switch />,
@@ -50,7 +52,6 @@ const SharePdf = memo((props: { message?: UIChatMessage }) => {
       layout: 'horizontal',
       minWidth: undefined,
       name: 'withRole',
-      valuePropName: 'checked',
     },
     {
       children: <Switch />,
@@ -58,7 +59,6 @@ const SharePdf = memo((props: { message?: UIChatMessage }) => {
       layout: 'horizontal',
       minWidth: undefined,
       name: 'includeUser',
-      valuePropName: 'checked',
     },
     {
       children: <Switch />,
@@ -66,7 +66,6 @@ const SharePdf = memo((props: { message?: UIChatMessage }) => {
       layout: 'horizontal',
       minWidth: undefined,
       name: 'includeTool',
-      valuePropName: 'checked',
     },
   ];
 
@@ -98,18 +97,13 @@ const SharePdf = memo((props: { message?: UIChatMessage }) => {
     }
   };
 
-  // Update configuration when form changes
-  const handleConfigChange = (_changedValues: any, allValues: FieldType) => {
-    setFieldValue(allValues);
-  };
-
   const handleDownload = async () => {
     if (pdfData) {
       try {
         await downloadPdf();
-        message.success(t('shareModal.downloadSuccess'));
+        toast.success(t('shareModal.downloadSuccess'));
       } catch {
-        message.error(t('shareModal.downloadError'));
+        toast.error(t('shareModal.downloadError'));
       }
     }
   };
@@ -157,13 +151,7 @@ const SharePdf = memo((props: { message?: UIChatMessage }) => {
         </div>
         <Flexbox className={styles.sidebar} gap={12}>
           <div>{t('shareModal.pdfErrorDescription')}</div>
-          <Form
-            initialValues={DEFAULT_FIELD_VALUE}
-            items={settings}
-            itemsType={'flat'}
-            onValuesChange={handleConfigChange}
-            {...FORM_STYLE}
-          />
+          <Form form={form} items={settings} itemsType={'flat'} {...FORM_STYLE} />
           {generateButton}
         </Flexbox>
       </Flexbox>
@@ -174,13 +162,7 @@ const SharePdf = memo((props: { message?: UIChatMessage }) => {
     <Flexbox className={styles.body} gap={16} horizontal={!isMobile}>
       <PdfPreview loading={loading} pdfData={pdfData} onGeneratePdf={handleGeneratePdf} />
       <Flexbox className={styles.sidebar} gap={12}>
-        <Form
-          initialValues={DEFAULT_FIELD_VALUE}
-          items={settings}
-          itemsType={'flat'}
-          onValuesChange={handleConfigChange}
-          {...FORM_STYLE}
-        />
+        <Form form={form} items={settings} itemsType={'flat'} {...FORM_STYLE} />
         {pdfData && generateButton}
         {downloadButton}
       </Flexbox>

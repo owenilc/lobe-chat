@@ -1,19 +1,47 @@
+import { PAGE_DOCUMENT_FILE_TYPES, PAGE_DOCUMENT_SOURCE_TYPES } from '@lobechat/const';
+import { type DocumentItem } from '@lobechat/database/schemas';
 import { type SWRResponse } from 'swr';
 
 import { useClientDataSWRWithSync } from '@/libs/swr';
 import { documentService } from '@/services/document';
+import { documentSWRKeys } from '@/services/document/swrKeys';
 import { useGlobalStore } from '@/store/global';
 import { type StoreSetter } from '@/store/types';
-import { type LobeDocument } from '@/types/document';
+import { DocumentSourceType, type LobeDocument } from '@/types/document';
 import { setNamespace } from '@/utils/storeDebug';
 
-import { type PageQueryFilter } from '../../initialState';
 import { type PageStore } from '../../store';
+
+const documentItemToLobeDocument = (document: DocumentItem): LobeDocument => ({
+  content: document.content || null,
+  createdAt: document.createdAt ? new Date(document.createdAt) : new Date(),
+  editorData:
+    typeof document.editorData === 'string'
+      ? JSON.parse(document.editorData)
+      : document.editorData || null,
+  fileType: document.fileType,
+  filename: document.title || document.filename || 'Untitled',
+  id: document.id,
+  metadata: document.metadata || {},
+  source: 'document',
+  sourceType: DocumentSourceType.EDITOR,
+  title: document.title || '',
+  totalCharCount: document.content?.length || 0,
+  totalLineCount: 0,
+  updatedAt: document.updatedAt ? new Date(document.updatedAt) : new Date(),
+  userId: document.userId,
+  visibility: document.visibility ?? null,
+  workspaceId: document.workspaceId ?? null,
+});
 
 const n = setNamespace('page/list');
 
-const ALLOWED_PAGE_SOURCE_TYPES = new Set(['editor', 'file', 'api']);
-const ALLOWED_PAGE_FILE_TYPES = new Set(['custom/document', 'application/pdf']);
+// EDITOR is a client-only stamp on in-memory drafts; DB rows never carry it.
+const ALLOWED_PAGE_SOURCE_TYPES = new Set([
+  DocumentSourceType.EDITOR as string,
+  ...PAGE_DOCUMENT_SOURCE_TYPES,
+]);
+const ALLOWED_PAGE_FILE_TYPES = new Set(PAGE_DOCUMENT_FILE_TYPES);
 
 /**
  * Check if a page should be displayed in the page list
@@ -41,23 +69,9 @@ export class ListActionImpl {
   fetchDocuments = async (): Promise<void> => {
     try {
       const pageSize = useGlobalStore.getState().status.pagePageSize || 20;
-      const queryFilters: PageQueryFilter = {
-        fileTypes: Array.from(ALLOWED_PAGE_FILE_TYPES),
-        sourceTypes: Array.from(ALLOWED_PAGE_SOURCE_TYPES),
-      };
 
-      const result = await documentService.queryDocuments({
-        current: 0,
-        pageSize,
-        ...queryFilters,
-      });
-
-      const documents = result.items.filter(isAllowedPage).map((doc) => ({
-        ...doc,
-        filename: doc.filename ?? doc.title ?? 'Untitled',
-      })) as LobeDocument[];
-
-      const hasMore = result.items.length >= pageSize;
+      const documents = (await documentService.getPageDocuments(pageSize)) as LobeDocument[];
+      const hasMore = documents.length >= pageSize;
 
       // Use internal dispatch to set documents
       this.#get().internal_dispatchDocuments({ documents, type: 'setDocuments' });
@@ -65,9 +79,12 @@ export class ListActionImpl {
       this.#set(
         {
           currentPage: 0,
-          documentsTotal: result.total,
+          documentsTotal: documents.length,
           hasMoreDocuments: hasMore,
-          queryFilter: queryFilters,
+          queryFilter: {
+            fileTypes: Array.from(ALLOWED_PAGE_FILE_TYPES),
+            sourceTypes: Array.from(ALLOWED_PAGE_SOURCE_TYPES),
+          },
         },
         false,
         n('fetchDocuments/success'),
@@ -126,6 +143,32 @@ export class ListActionImpl {
     await this.#get().fetchDocuments();
   };
 
+  /**
+   * Publish a private page (and its whole subtree) to the workspace, then
+   * refetch the sidebar so the item hops from the "Private" accordion into
+   * "Workspace" immediately. Errors bubble up so the caller can surface a
+   * localized toast without swallowing the reason.
+   */
+  publishPageToWorkspace = async (pageId: string): Promise<{ documentIds: string[] }> => {
+    const result = await documentService.publishDocumentToWorkspace(pageId);
+    await this.#get().refreshDocuments();
+    return result;
+  };
+
+  /**
+   * Flip a page (and its whole subtree)'s workspace visibility. Bidirectional
+   * companion to `publishPageToWorkspace`. Refreshes the sidebar so the row
+   * hops between the "Private" and "Workspace" accordions.
+   */
+  setPageVisibility = async (
+    pageId: string,
+    visibility: 'private' | 'public',
+  ): Promise<{ documentIds: string[] }> => {
+    const result = await documentService.setDocumentVisibility(pageId, visibility);
+    await this.#get().refreshDocuments();
+    return result;
+  };
+
   setSearchKeywords = (keywords: string): void => {
     this.#set({ searchKeywords: keywords }, false, n('setSearchKeywords'));
   };
@@ -134,28 +177,23 @@ export class ListActionImpl {
     this.#set({ showOnlyPagesNotInLibrary: show }, false, n('setShowOnlyPagesNotInLibrary'));
   };
 
+  upsertDocument = (document: DocumentItem): void => {
+    const lobeDoc = documentItemToLobeDocument(document);
+    const { documents } = this.#get();
+    const exists = documents?.some((doc) => doc.id === document.id);
+    this.#get().internal_dispatchDocuments(
+      exists
+        ? { document: lobeDoc, id: document.id, type: 'updateDocument' }
+        : { document: lobeDoc, type: 'addDocument' },
+    );
+  };
+
   useFetchDocuments = (): SWRResponse<LobeDocument[]> => {
     return useClientDataSWRWithSync<LobeDocument[]>(
-      ['pageDocuments'],
+      documentSWRKeys.pageDocuments(),
       async () => {
         const pageSize = useGlobalStore.getState().status.pagePageSize || 20;
-        const queryFilters: PageQueryFilter = {
-          fileTypes: Array.from(ALLOWED_PAGE_FILE_TYPES),
-          sourceTypes: Array.from(ALLOWED_PAGE_SOURCE_TYPES),
-        };
-
-        const result = await documentService.queryDocuments({
-          current: 0,
-          pageSize,
-          ...queryFilters,
-        });
-
-        const documents = result.items.filter(isAllowedPage).map((doc) => ({
-          ...doc,
-          filename: doc.filename ?? doc.title ?? 'Untitled',
-        })) as LobeDocument[];
-
-        return documents;
+        return (await documentService.getPageDocuments(pageSize)) as LobeDocument[];
       },
       {
         onData: (documents) => {

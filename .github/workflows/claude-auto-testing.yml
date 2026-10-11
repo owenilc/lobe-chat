@@ -1,5 +1,5 @@
 name: Claude Auto Testing Coverage
-description: Automatically add unit tests to improve code coverage
+# Automatically add unit tests to improve code coverage
 
 on:
   schedule:
@@ -27,13 +27,13 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+      - name: Setup environment
+        uses: ./.github/actions/setup-env
 
       - name: Install dependencies
-        run: bun install --frozen-lockfile
+        run: pnpm install --frozen-lockfile
 
       - name: Configure Git
         run: |

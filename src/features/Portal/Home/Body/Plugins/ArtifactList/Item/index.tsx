@@ -1,5 +1,6 @@
 import { type ChatPluginPayload } from '@lobechat/types';
-import { Flexbox, Icon, Tag, Text } from '@lobehub/ui';
+import { Flexbox, Icon } from '@lobehub/ui';
+import { Tag, Text } from '@lobehub/ui/base-ui';
 import { cx } from 'antd-style';
 import isEqual from 'fast-deep-equal';
 import { CircuitBoard } from 'lucide-react';
@@ -28,7 +29,7 @@ const ArtifactItem = memo<ArtifactItemProps>(({ payload, messageId, identifier =
   const pluginMeta = useToolStore(toolSelectors.getMetaById(identifier), isEqual);
   const isToolHasUI = useToolStore(toolSelectors.isToolHasUI(identifier));
   const openToolUI = useChatStore((s) => s.openToolUI);
-  const pluginTitle = pluginHelpers.getPluginTitle(pluginMeta) ?? t('unknownPlugin');
+  const pluginTitle = pluginHelpers.getPluginTitle(pluginMeta) ?? identifier;
 
   return (
     <Flexbox

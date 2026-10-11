@@ -1,18 +1,21 @@
 'use client';
 
 import { EDITOR_DEBOUNCE_TIME, EDITOR_MAX_WAIT } from '@lobechat/const';
-import { type DocumentItem } from '@lobechat/database/schemas';
-import { type IEditor } from '@lobehub/editor';
+import type { DocumentItem } from '@lobechat/database/schemas';
+import type { IEditor } from '@lobehub/editor';
 import { debounce } from 'es-toolkit/compat';
-import { type SWRResponse } from 'swr';
+import type { SWRResponse } from 'swr';
 
 import { useClientDataSWRWithSync } from '@/libs/swr';
 import { documentService } from '@/services/document';
-import { type StoreSetter } from '@/store/types';
+import { documentSWRKeys } from '@/services/document/swrKeys';
+import { usePageStore } from '@/store/page';
+import type { StoreSetter } from '@/store/types';
+import { isSkillMarkdownDocument, parseSkillMarkdownFrontmatter } from '@/utils/skillMarkdown';
 import { setNamespace } from '@/utils/storeDebug';
 
-import { type DocumentStore } from '../../store';
-import { type DocumentSourceType } from '../editor/initialState';
+import type { DocumentStore } from '../../store';
+import type { DocumentContentFormat, DocumentSourceType } from '../editor/initialState';
 
 const n = setNamespace('document/document');
 
@@ -26,11 +29,13 @@ export interface InitDocumentParams {
    */
   autoSave?: boolean;
   content?: string | null;
+  contentFormat?: DocumentContentFormat;
   documentId: string;
   editor: IEditor;
   editorData?: unknown;
   sourceType: DocumentSourceType;
   topicId?: string;
+  updatedAt?: Date | string | null;
 }
 
 /**
@@ -49,6 +54,10 @@ export interface UseFetchDocumentOptions {
    * Source type for the document. Defaults to 'page'.
    */
   sourceType?: DocumentSourceType;
+  /**
+   * Topic ID for notebook documents.
+   */
+  topicId?: string | null;
 }
 
 type Setter = StoreSetter<DocumentStore>;
@@ -66,12 +75,16 @@ export class DocumentActionImpl {
     this.#get = get;
   }
 
+  cancelDebouncedSave = (documentId: string): void => {
+    this.#debouncedSaves.get(documentId)?.cancel();
+  };
+
   #getOrCreateDebouncedSave = (documentId: string) => {
     if (!this.#debouncedSaves.has(documentId)) {
       const debouncedFn = debounce(
         async () => {
           try {
-            await this.#get().performSave(documentId);
+            await this.#get().performSave(documentId, undefined, { saveSource: 'autosave' });
           } catch (error) {
             console.error('[DocumentStore] Failed to auto-save:', error);
           }
@@ -103,15 +116,17 @@ export class DocumentActionImpl {
       this.#cleanupDebouncedSave(documentId);
     }
 
-    const { activeDocumentId, internal_dispatchDocument } = this.#get();
-
-    // Delete document via reducer
-    internal_dispatchDocument({ id: documentId, type: 'deleteDocument' });
+    const { activeDocumentId, internal_dispatchDocument, getPendingSave } = this.#get();
 
     // Update activeDocumentId if needed
     if (activeDocumentId === documentId) {
       this.#set({ activeDocumentId: undefined }, false, n('closeDocument:clearActive'));
     }
+
+    const remove = () => internal_dispatchDocument({ id: documentId, type: 'deleteDocument' });
+    const pending = getPendingSave(documentId);
+    if (pending) void pending.then(remove, remove);
+    else remove();
   };
 
   /**
@@ -130,9 +145,23 @@ export class DocumentActionImpl {
    * Content is loaded into editor via onEditorInit when Editor component is ready.
    */
   initDocumentWithEditor = (params: InitDocumentParams): void => {
-    const { documentId, sourceType, content, editorData, topicId, autoSave, editor } = params;
+    const {
+      autoSave,
+      content,
+      contentFormat,
+      documentId,
+      editor,
+      editorData,
+      sourceType,
+      topicId,
+      updatedAt,
+    } = params;
 
     const { internal_dispatchDocument } = this.#get();
+    const skillFrontmatter =
+      contentFormat === 'skillMarkdown'
+        ? parseSkillMarkdownFrontmatter(content).frontmatter
+        : undefined;
 
     // Add or update document via reducer
     internal_dispatchDocument({
@@ -141,11 +170,19 @@ export class DocumentActionImpl {
       value: {
         autoSave,
         content: content ?? undefined,
+        contentFormat,
         editorData,
+
         lastSavedContent: content ?? undefined,
         lastSavedEditorData: editorData,
         sourceType,
+        skillFrontmatter,
         topicId,
+        ...(updatedAt
+          ? {
+              lastUpdatedTime: updatedAt instanceof Date ? updatedAt : new Date(updatedAt),
+            }
+          : {}),
       },
     });
 
@@ -154,6 +191,20 @@ export class DocumentActionImpl {
       { activeDocumentId: documentId, editor },
       false,
       n('initDocumentWithEditor:setActive'),
+    );
+    if (sourceType === 'notebook' && topicId) this.#rememberTopicDocument(topicId, documentId);
+  };
+
+  #rememberTopicDocument = (topicId: string, documentId: string) => {
+    this.#set(
+      {
+        lastActiveTopicDocumentIdByTopicId: {
+          ...this.#get().lastActiveTopicDocumentIdByTopicId,
+          [topicId]: documentId,
+        },
+      },
+      false,
+      n('rememberTopicDocument'),
     );
   };
 
@@ -172,8 +223,8 @@ export class DocumentActionImpl {
     documentId: string | undefined,
     options: UseFetchDocumentOptions = {},
   ): SWRResponse<DocumentItem | null> => {
-    const { autoSave = true, editor, sourceType = 'page' } = options;
-    const swrKey = documentId && editor ? ['document/editor', documentId] : null;
+    const { autoSave = true, editor, sourceType = 'page', topicId } = options;
+    const swrKey = documentId && editor ? documentSWRKeys.editor(documentId) : null;
 
     return useClientDataSWRWithSync<DocumentItem | null>(
       swrKey,
@@ -202,15 +253,35 @@ export class DocumentActionImpl {
             return;
           }
 
-          // Initialize document with editor
+          if (this.#get().documents[documentId]) {
+            this.#get().reconcileRemote(documentId, document);
+            if (sourceType === 'notebook' && topicId) {
+              this.#rememberTopicDocument(topicId, documentId);
+            }
+            if (sourceType === 'page') {
+              usePageStore.getState().upsertDocument(document);
+            }
+            return;
+          }
+
           this.#get().initDocumentWithEditor({
             autoSave,
             content: document.content,
+            contentFormat: isSkillMarkdownDocument(document) ? 'skillMarkdown' : 'markdown',
             documentId,
             editor,
             editorData: document.editorData,
             sourceType,
+            topicId: topicId ?? undefined,
+            updatedAt: document.updatedAt,
           });
+
+          // Mirror page metadata (title/emoji) into pageStore so PageExplorer
+          // selectors resolve correctly when the page is opened from a context
+          // that didn't pre-load the documents list (e.g. task workspace modal).
+          if (sourceType === 'page') {
+            usePageStore.getState().upsertDocument(document);
+          }
         },
         revalidateOnFocus: true,
       },

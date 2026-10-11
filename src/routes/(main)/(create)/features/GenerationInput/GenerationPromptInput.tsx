@@ -1,7 +1,8 @@
 'use client';
 
 import { ChatInput, ChatInputActionBar, SendButton } from '@lobehub/editor/react';
-import { Flexbox, TextArea } from '@lobehub/ui';
+import { Flexbox } from '@lobehub/ui';
+import { TextArea } from '@lobehub/ui/base-ui';
 import { createStaticStyles } from 'antd-style';
 import type { KeyboardEvent, ReactNode } from 'react';
 import { memo } from 'react';
@@ -9,6 +10,7 @@ import { memo } from 'react';
 interface GenerationPromptInputProps {
   centerActions?: ReactNode;
   className?: string;
+  disabled?: boolean;
   disableGenerate?: boolean;
   generateLabel: string;
   generatingLabel: string;
@@ -50,6 +52,7 @@ const GenerationPromptInput = memo<GenerationPromptInputProps>(
     generateLabel,
     generatingLabel,
     disableGenerate,
+    disabled,
     minRows = 3,
     maxRows = 6,
   }) => {
@@ -57,7 +60,7 @@ const GenerationPromptInput = memo<GenerationPromptInputProps>(
       if (e.key !== 'Enter' || e.shiftKey || e.nativeEvent.isComposing) return;
 
       e.preventDefault();
-      if (disableGenerate || isCreating || !value?.trim()) return;
+      if (disabled || disableGenerate || isCreating || !value?.trim()) return;
 
       await onGenerate();
     };
@@ -66,11 +69,16 @@ const GenerationPromptInput = memo<GenerationPromptInputProps>(
       <TextArea
         autoSize={{ maxRows, minRows }}
         className={styles.textarea}
+        disabled={disabled}
         placeholder={placeholder}
         value={value}
         variant={'borderless'}
-        onChange={(e) => onValueChange(e.target.value)}
         onKeyDown={handleKeyDown}
+        onChange={(e) => {
+          if (disabled) return;
+
+          onValueChange(e.target.value);
+        }}
       />
     );
 
@@ -103,10 +111,14 @@ const GenerationPromptInput = memo<GenerationPromptInputProps>(
               >
                 {rightActions}
                 <SendButton
-                  disabled={disableGenerate || !value}
+                  disabled={disabled || disableGenerate || !value}
                   loading={isCreating}
                   title={isCreating ? generatingLabel : generateLabel}
-                  onClick={onGenerate}
+                  onClick={() => {
+                    if (disabled) return;
+
+                    onGenerate();
+                  }}
                 />
               </Flexbox>
             </Flexbox>
@@ -117,10 +129,14 @@ const GenerationPromptInput = memo<GenerationPromptInputProps>(
                 <Flexbox horizontal align={'center'} gap={8}>
                   {rightActions}
                   <SendButton
-                    disabled={disableGenerate || !value}
+                    disabled={disabled || disableGenerate || !value}
                     loading={isCreating}
                     title={isCreating ? generatingLabel : generateLabel}
-                    onClick={onGenerate}
+                    onClick={() => {
+                      if (disabled) return;
+
+                      onGenerate();
+                    }}
                   />
                 </Flexbox>
               }

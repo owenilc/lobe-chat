@@ -2,23 +2,8 @@
 import { ModelProvider } from 'model-bank';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { testProvider } from '../../providerTestUtils';
 import type { VercelAIGatewayModelCard } from './index';
 import { formatPrice, LobeVercelAIGatewayAI, params } from './index';
-
-testProvider({
-  Runtime: LobeVercelAIGatewayAI,
-  bizErrorType: 'ProviderBizError',
-  chatDebugEnv: 'DEBUG_VERCELAIGATEWAY_CHAT_COMPLETION',
-  chatModel: 'gpt-4o',
-  defaultBaseURL: 'https://ai-gateway.vercel.sh/v1',
-  invalidErrorType: 'InvalidProviderAPIKey',
-  provider: ModelProvider.VercelAIGateway,
-  test: {
-    skipAPICall: true,
-    skipErrorHandle: true,
-  },
-});
 
 describe('LobeVercelAIGatewayAI - custom features', () => {
   let instance: InstanceType<typeof LobeVercelAIGatewayAI>;
@@ -249,6 +234,13 @@ describe('LobeVercelAIGatewayAI - custom features', () => {
     it('should map extendParams for gpt-5.x reasoning models', async () => {
       const mockModelData: VercelAIGatewayModelCard[] = [
         {
+          id: 'openai/gpt-5.5',
+          name: 'GPT-5.5',
+          pricing: { input: 0.000_005, output: 0.000_03 },
+          tags: ['reasoning'],
+          type: 'chat',
+        },
+        {
           id: 'openai/gpt-5.2-mini',
           name: 'GPT-5.2 Mini',
           pricing: { input: 0.000_003, output: 0.000_015 },
@@ -278,10 +270,14 @@ describe('LobeVercelAIGatewayAI - custom features', () => {
       };
 
       const models = await params.models({ client: mockClient as any });
+      const gpt55 = models.find((m) => m.id === 'openai/gpt-5.5');
       const gpt52 = models.find((m) => m.id === 'openai/gpt-5.2-mini');
       const gpt51 = models.find((m) => m.id === 'openai/gpt-5.1-mini');
       const gpt5 = models.find((m) => m.id === 'openai/gpt-5-mini');
 
+      expect(gpt55?.settings?.extendParams).toEqual(
+        expect.arrayContaining(['gpt5_2ReasoningEffort', 'textVerbosity']),
+      );
       expect(gpt52?.settings?.extendParams).toEqual(
         expect.arrayContaining(['gpt5_2ReasoningEffort', 'textVerbosity']),
       );

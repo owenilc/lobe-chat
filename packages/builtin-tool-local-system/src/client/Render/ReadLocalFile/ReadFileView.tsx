@@ -1,14 +1,17 @@
-import type { LocalReadFileResult } from '@lobechat/electron-client-ipc';
-import { ActionIcon, Flexbox, Icon, Markdown, Text } from '@lobehub/ui';
+import { useToolRenderCapabilities } from '@lobechat/shared-tool-ui';
+import type { ReadFileState } from '@lobechat/tool-runtime';
+import { Flexbox, Image, Markdown, PreviewGroup, SyntaxHighlighter } from '@lobehub/ui';
+import { ActionIcon, Text } from '@lobehub/ui/base-ui';
 import { createStaticStyles } from 'antd-style';
-import { AlignLeft, Asterisk, ExternalLink, FolderOpen } from 'lucide-react';
-import React, { memo } from 'react';
+import { ExternalLink, FolderOpen, SquareArrowOutUpRight } from 'lucide-react';
+import type { CSSProperties } from 'react';
+import React, { memo, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import FileIcon from '@/components/FileIcon';
-import { localFileService } from '@/services/electron/localFileService';
-import { useElectronStore } from '@/store/electron';
-import { desktopStateSelectors } from '@/store/electron/selectors';
+import { InlineHtmlPreview, isHtmlFile } from '@/components/HtmlPreview';
+import { useOpenEditedFile } from '@/features/Conversation/Messages/EditedFilesCard/useOpenEditedFile';
+
+import { stripFinalLineTerminator } from './buildReadFileState';
 
 const styles = createStaticStyles(({ css, cssVar }) => ({
   actions: css`
@@ -20,51 +23,62 @@ const styles = createStaticStyles(({ css, cssVar }) => ({
   container: css`
     justify-content: space-between;
 
-    padding: 8px;
-    border-radius: ${cssVar.borderRadiusLG};
-
-    background: ${cssVar.colorFillQuaternary};
-
-    transition: all 0.2s ${cssVar.motionEaseInOut};
-
     .local-file-actions {
       opacity: 0;
     }
 
-    &:hover {
-      border-color: ${cssVar.colorBorder};
-
-      .local-file-actions {
-        opacity: 1;
-      }
+    &:hover .local-file-actions {
+      opacity: 1;
     }
   `,
-  fileName: css`
-    flex: 1;
-    margin-inline-start: 8px;
-    color: ${cssVar.colorTextSecondary};
+  image: css`
+    border-radius: ${cssVar.borderRadiusLG};
+  `,
+  imageList: css`
+    flex-wrap: wrap;
+  `,
+  // Gutter drawn with a CSS counter on shiki's `.line` spans, so the numbers
+  // never get copied along with the code. `&&` outranks the highlighter's own
+  // `.line` padding.
+  lineNumbers: css`
+    && pre code {
+      counter-reset: read-file-line var(--read-file-line-offset);
+    }
 
-    &:hover {
-      color: ${cssVar.colorText};
+    && pre code .line {
+      counter-increment: read-file-line;
+      position: relative;
+      padding-inline-start: calc(var(--read-file-gutter) + 16px + 12px);
+    }
+
+    && pre code .line::before {
+      content: counter(read-file-line);
+      user-select: none;
+
+      position: absolute;
+      inset-inline-start: 16px;
+
+      width: var(--read-file-gutter);
+
+      color: ${cssVar.colorTextQuaternary};
+      text-align: end;
+    }
+
+    /* Blank lines render as empty spans; give them a line box so they keep
+       their row and number. */
+    && pre code .line:empty::after {
+      content: ' ';
     }
   `,
-  header: css`
-    cursor: pointer;
-  `,
-  lineCount: css`
-    color: ${cssVar.colorTextQuaternary};
-  `,
-  meta: css`
-    font-size: 12px;
-    color: ${cssVar.colorTextTertiary};
-  `,
+  // Shrinks to its text so the hover actions sit right after the path.
   path: css`
-    margin-block-start: 4px;
+    flex: 0 1 auto;
+
+    min-width: 0;
     padding-inline: 4px;
 
     font-size: 12px;
     color: ${cssVar.colorTextSecondary};
-    word-break: break-all;
   `,
   previewBox: css`
     position: relative;
@@ -77,101 +91,146 @@ const styles = createStaticStyles(({ css, cssVar }) => ({
 
     background: ${cssVar.colorBgContainer};
   `,
-  previewText: css`
-    overflow: auto;
-
-    font-family: ${cssVar.fontFamilyCode};
-    font-size: 12px;
-    line-height: 1.6;
-    word-break: break-all;
-    white-space: pre-wrap;
-  `,
 }));
 
-// Assuming the result object might include the original path and an optional warning
-interface ReadFileViewProps extends LocalReadFileResult {
-  path: string; // The full path requested
+interface ReadFileViewProps extends ReadFileState {
+  /** 1-based number of the first line in `content`, seeds the gutter. */
+  firstLineNumber?: number;
+  /** The file lives in the cloud sandbox rather than on a local filesystem. */
+  sandboxBacked?: boolean;
 }
 
 const ReadFileView = memo<ReadFileViewProps>(
-  ({ filename, path, fileType, charCount, content, totalLineCount, totalCharCount, loc }) => {
+  ({
+    filename: filenameProp,
+    path,
+    fileType,
+    content,
+    images,
+    firstLineNumber = 1,
+    sandboxBacked = false,
+  }) => {
     const { t } = useTranslation('tool');
+    const { openFile, openFolder, displayRelativePath } = useToolRenderCapabilities();
+    const resolveOpenInPanel = useOpenEditedFile();
+    const filename = filenameProp || path.split('/').pop() || path;
 
-    const handleOpenFile = (e: React.MouseEvent) => {
-      e.stopPropagation();
-      localFileService.openLocalFile({ path });
-    };
+    const code = useMemo(() => stripFinalLineTerminator(content), [content]);
 
-    const handleOpenFolder = (e: React.MouseEvent) => {
-      e.stopPropagation();
-      localFileService.openLocalFolder({ isDirectory: false, path });
-    };
+    const lineNumberVars = useMemo(() => {
+      const lastLine = firstLineNumber + code.split('\n').length - 1;
+      return {
+        '--read-file-gutter': `${String(lastLine).length}ch`,
+        '--read-file-line-offset': firstLineNumber - 1,
+      } as CSSProperties;
+    }, [code, firstLineNumber]);
 
-    const displayPath = useElectronStore(desktopStateSelectors.displayRelativePath(path));
-
-    return (
-      <Flexbox className={styles.container} gap={12}>
-        <Flexbox>
-          <Flexbox
-            horizontal
-            align={'center'}
-            className={styles.header}
-            gap={12}
-            justify={'space-between'}
-          >
-            <Flexbox horizontal align={'center'} flex={1} gap={0} style={{ overflow: 'hidden' }}>
-              <FileIcon fileName={filename} fileType={fileType} size={16} variant={'raw'} />
-              <Flexbox horizontal>
-                <Text ellipsis className={styles.fileName}>
-                  {filename}
-                </Text>
-                {/* Actions on Hover */}
-                <Flexbox horizontal className={styles.actions} gap={2} style={{ marginLeft: 8 }}>
-                  <ActionIcon
-                    icon={ExternalLink}
-                    size="small"
-                    title={t('localFiles.openFile')}
-                    onClick={handleOpenFile}
-                  />
-                  <ActionIcon
-                    icon={FolderOpen}
-                    size="small"
-                    title={t('localFiles.openFolder')}
-                    onClick={handleOpenFolder}
-                  />
-                </Flexbox>
-              </Flexbox>
-            </Flexbox>
-            <Flexbox horizontal align={'center'} className={styles.meta} gap={16}>
-              <Flexbox horizontal align={'center'} gap={4}>
-                <Icon icon={Asterisk} size={'small'} />
-                <span>
-                  {charCount} / <span className={styles.lineCount}>{totalCharCount}</span>
-                </span>
-              </Flexbox>
-              <Flexbox horizontal align={'center'} gap={4}>
-                <Icon icon={AlignLeft} size={'small'} />
-                <span>
-                  L{loc?.[0]}-{loc?.[1]} /{' '}
-                  <span className={styles.lineCount}>{totalLineCount}</span>
-                </span>
-              </Flexbox>
-            </Flexbox>
+    // Reading an image is best shown as the image itself: no card, no header, no path.
+    if (images && images.length > 0) {
+      return (
+        <PreviewGroup>
+          <Flexbox horizontal align={'flex-start'} className={styles.imageList} gap={8}>
+            {images.map((image, index) => (
+              <Image
+                alt={filename || image.mediaType || ''}
+                className={styles.image}
+                key={image.url || index}
+                maxHeight={600}
+                objectFit={'contain'}
+                src={image.url}
+                variant={'outlined'}
+              />
+            ))}
           </Flexbox>
+        </PreviewGroup>
+      );
+    }
 
-          {/* Path */}
-          <Text ellipsis className={styles.path} type={'secondary'}>
+    const isHtml = isHtmlFile({ fileName: filename, fileType, path });
+    const isMarkdown = fileType === 'md';
+
+    const openInPanel = resolveOpenInPanel({ kind: 'modified', path, sandboxBacked });
+
+    const handleOpenFile = openFile
+      ? (e: React.MouseEvent) => {
+          e.stopPropagation();
+          openFile(path);
+        }
+      : undefined;
+
+    const handleOpenFolder = openFolder
+      ? (e: React.MouseEvent) => {
+          e.stopPropagation();
+          openFolder(path);
+        }
+      : undefined;
+
+    const displayPath = displayRelativePath ? displayRelativePath(path) : path;
+
+    // The inspector header already names the file, so the card only carries its path.
+    return (
+      <Flexbox className={styles.container} gap={8}>
+        <Flexbox horizontal align={'center'} gap={4}>
+          <Text ellipsis className={styles.path} title={path} type={'secondary'}>
             {displayPath}
           </Text>
+          {(openInPanel || handleOpenFile || handleOpenFolder) && (
+            <Flexbox
+              horizontal
+              className={`${styles.actions} local-file-actions`}
+              flex={'none'}
+              gap={2}
+            >
+              {openInPanel && (
+                <ActionIcon
+                  icon={SquareArrowOutUpRight}
+                  size="small"
+                  title={t('localFiles.openInPanel')}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    openInPanel();
+                  }}
+                />
+              )}
+              {handleOpenFile && (
+                <ActionIcon
+                  icon={ExternalLink}
+                  size="small"
+                  title={t('localFiles.openFile')}
+                  onClick={handleOpenFile}
+                />
+              )}
+              {handleOpenFolder && (
+                <ActionIcon
+                  icon={FolderOpen}
+                  size="small"
+                  title={t('localFiles.openFolder')}
+                  onClick={handleOpenFolder}
+                />
+              )}
+            </Flexbox>
+          )}
         </Flexbox>
 
-        <Flexbox className={styles.previewBox} style={{ maxHeight: 240 }}>
-          {fileType === 'md' ? (
+        <Flexbox
+          className={styles.previewBox}
+          style={{ height: isHtml ? 240 : undefined, maxHeight: 240 }}
+        >
+          {isHtml ? (
+            <InlineHtmlPreview content={content} />
+          ) : isMarkdown ? (
             <Markdown style={{ overflow: 'auto' }}>{content}</Markdown>
           ) : (
-            <div className={styles.previewText} style={{ width: '100%' }}>
-              {content}
-            </div>
+            // The bare highlighter: `Highlighter` trims its input, which would
+            // strip the first line's indentation and misalign the gutter.
+            <SyntaxHighlighter
+              className={styles.lineNumbers}
+              language={fileType || 'text'}
+              style={{ ...lineNumberVars, overflow: 'auto' }}
+              variant={'borderless'}
+            >
+              {code}
+            </SyntaxHighlighter>
           )}
         </Flexbox>
       </Flexbox>

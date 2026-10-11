@@ -4,8 +4,10 @@ import { type StateCreator } from 'zustand';
 
 import { messageService } from '@/services/message';
 import { useChatStore } from '@/store/chat';
+import { cleanBotPromptTags } from '@/store/chat/utils/parseReferencedMessage';
 
 import { type Store as ConversationStore } from '../../../action';
+import { isSameConversationContext } from '../../../utils/contextGuard';
 import { dataSelectors } from '../../data/selectors';
 
 /**
@@ -81,13 +83,13 @@ export const messageStateSlice: StateCreator<
     });
 
     // Replace messages with restored original messages
-    replaceMessages(messages);
+    replaceMessages(messages, { expectedContext: context });
   },
 
   copyMessage: async (id, content) => {
     const { hooks } = get();
 
-    await copyToClipboard(content);
+    await copyToClipboard(cleanBotPromptTags(content));
 
     // ===== Hook: onMessageCopied =====
     if (hooks.onMessageCopied) {
@@ -113,7 +115,7 @@ export const messageStateSlice: StateCreator<
   },
 
   modifyMessageContent: async (id, content, editorData) => {
-    const { hooks } = get();
+    const { context, hooks } = get();
 
     // Get original content for hook
     const originalMessage = dataSelectors.getDisplayMessageById(id)(get());
@@ -121,6 +123,7 @@ export const messageStateSlice: StateCreator<
 
     // Update content
     await get().updateMessageContent(id, content, editorData ? { editorData } : undefined);
+    if (!isSameConversationContext(context, get().context)) return;
 
     // ===== Hook: onMessageModified =====
     if (hooks.onMessageModified) {
@@ -159,7 +162,7 @@ export const messageStateSlice: StateCreator<
     });
 
     // Sync with server data
-    replaceMessages(messages);
+    replaceMessages(messages, { expectedContext: context });
   },
 
   toggleInspectExpanded: async (id, expanded) => {

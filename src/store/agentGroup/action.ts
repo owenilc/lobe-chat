@@ -5,15 +5,17 @@ import { type StateCreator } from 'zustand/vanilla';
 
 import { type ChatGroupItem } from '@/database/schemas/chatGroup';
 import { mutate, useClientDataSWRWithSync } from '@/libs/swr';
+import { groupKeys } from '@/libs/swr/keys';
 import { chatGroupService } from '@/services/chatGroup';
 import { getAgentStoreState } from '@/store/agent';
 import { type ChatGroupStore } from '@/store/agentGroup/store';
 import { useChatStore } from '@/store/chat';
 import { type StoreSetter } from '@/store/types';
 import { flattenActions } from '@/store/utils/flattenActions';
+import { type ResetableStore } from '@/store/utils/resetableStore';
 import { setNamespace } from '@/utils/storeDebug';
 
-import { type ChatGroupState } from './initialState';
+import { type ChatGroupState, initialChatGroupState } from './initialState';
 import { type ChatGroupDispatchPayloads, type ChatGroupReducer } from './reducers';
 import { chatGroupReducers } from './reducers';
 import { ChatGroupCurdAction } from './slices/curd';
@@ -21,9 +23,6 @@ import { ChatGroupLifecycleAction } from './slices/lifecycle';
 import { ChatGroupMemberAction } from './slices/member';
 
 const n = setNamespace('chatGroup');
-
-const FETCH_GROUPS_KEY = 'fetchGroups';
-const FETCH_GROUP_DETAIL_KEY = 'fetchGroupDetail';
 
 /**
  * Convert ChatGroupItem to AgentGroupDetail by adding empty agents array if not present
@@ -35,7 +34,7 @@ const toAgentGroupDetail = (group: ChatGroupItem): AgentGroupDetail =>
   }) as AgentGroupDetail;
 
 type Setter = StoreSetter<ChatGroupStore>;
-class ChatGroupInternalAction {
+class ChatGroupInternalAction implements ResetableStore {
   readonly #get: () => ChatGroupState;
   readonly #set: Setter;
 
@@ -46,6 +45,10 @@ class ChatGroupInternalAction {
     this.#set = set;
     this.#get = get;
   }
+
+  reset: ResetableStore['reset'] = () => {
+    this.#set(initialChatGroupState, false, n('reset'));
+  };
 
   internal_dispatchChatGroup = <T extends keyof ChatGroupDispatchPayloads>(payload: {
     payload: ChatGroupDispatchPayloads[T];
@@ -61,9 +64,45 @@ class ChatGroupInternalAction {
     );
   };
 
+  private removeStaleGroup = (groupId: string) => {
+    this.internal_dispatchChatGroup({ payload: groupId, type: 'deleteGroup' });
+  };
+
+  // A successful fetch that resolves to nothing means the group doesn't exist
+  // or the caller lost access (e.g. switched back to private) — a settled
+  // state the UI renders as a 404 card, not an error to retry.
+  #markGroupNotFound = (groupId: string) => {
+    if (this.#get().groupNotFoundMap[groupId]) return;
+
+    this.#set(
+      (state) => ({ groupNotFoundMap: { ...state.groupNotFoundMap, [groupId]: true } }),
+      false,
+      'markGroupNotFound',
+    );
+  };
+
+  #clearGroupNotFound = (groupId: string) => {
+    if (!this.#get().groupNotFoundMap[groupId]) return;
+
+    this.#set(
+      (state) => {
+        const next = { ...state.groupNotFoundMap };
+        delete next[groupId];
+        return { groupNotFoundMap: next };
+      },
+      false,
+      'clearGroupNotFound',
+    );
+  };
+
   internal_fetchGroupDetail = async (groupId: string) => {
     const groupDetail = await chatGroupService.getGroupDetail(groupId);
-    if (!groupDetail) return;
+    if (!groupDetail) {
+      this.removeStaleGroup(groupId);
+      this.#markGroupNotFound(groupId);
+      return;
+    }
+    this.#clearGroupNotFound(groupId);
 
     // Update groupMap with full group detail including supervisorAgentId and agents
     this.internal_dispatchChatGroup({
@@ -136,11 +175,11 @@ class ChatGroupInternalAction {
   };
 
   refreshGroupDetail = async (groupId: string) => {
-    await mutate([FETCH_GROUP_DETAIL_KEY, groupId]);
+    await mutate(groupKeys.detail(groupId));
   };
 
   refreshGroups = async () => {
-    await mutate([FETCH_GROUPS_KEY, true]);
+    await mutate(groupKeys.list(true));
   };
 
   toggleGroupSetting = (open: boolean) => {
@@ -153,15 +192,24 @@ class ChatGroupInternalAction {
 
   useFetchGroupDetail = (enabled: boolean, groupId: string) =>
     useClientDataSWRWithSync<AgentGroupDetail | null>(
-      enabled && groupId ? [FETCH_GROUP_DETAIL_KEY, groupId] : null,
+      enabled && groupId ? groupKeys.detail(groupId) : null,
       async () => {
         const groupDetail = await chatGroupService.getGroupDetail(groupId);
-        if (!groupDetail) throw new Error(`Group ${groupId} not found`);
+        // Resolve to null instead of throwing: "gone / no access" is a settled
+        // terminal state (rendered as a 404 card), not a retryable error.
+        if (!groupDetail) {
+          this.removeStaleGroup(groupId);
+          return null;
+        }
         return groupDetail;
       },
       {
         onData: (groupDetail) => {
-          if (!groupDetail) return;
+          if (!groupDetail) {
+            this.#markGroupNotFound(groupId);
+            return;
+          }
+          this.#clearGroupNotFound(groupId);
 
           // Update groupMap with detailed group info including agents
           const currentGroup = this.#get().groupMap[groupDetail.id];
@@ -215,7 +263,7 @@ class ChatGroupInternalAction {
   // This is not used for now, as we are combining group in the session lambda's response
   useFetchGroups = (enabled: boolean, isLogin: boolean) =>
     useClientDataSWRWithSync<ChatGroupItem[]>(
-      enabled ? [FETCH_GROUPS_KEY, isLogin] : null,
+      enabled ? groupKeys.list(isLogin) : null,
       async () => chatGroupService.getGroups(),
       {
         fallbackData: [],
@@ -247,7 +295,6 @@ class ChatGroupInternalAction {
             n('useFetchGroups/onData'),
           );
         },
-        suspense: true,
       },
     );
 }

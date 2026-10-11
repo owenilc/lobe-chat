@@ -1,5 +1,5 @@
-import { Block, Flexbox, Highlighter, Text } from '@lobehub/ui';
-import { Divider } from 'antd';
+import { Block, Flexbox, Highlighter } from '@lobehub/ui';
+import { Divider, Text } from '@lobehub/ui/base-ui';
 import { memo, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 

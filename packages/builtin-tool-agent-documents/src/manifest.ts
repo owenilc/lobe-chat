@@ -1,7 +1,15 @@
 import type { BuiltinToolManifest } from '@lobechat/types';
 
 import { systemPrompt } from './systemRole';
-import { AgentDocumentsApiName, AgentDocumentsIdentifier } from './types';
+import {
+  AgentDocumentsApiName,
+  AgentDocumentsIdentifier,
+  LIST_DOCUMENTS_DEFAULT_LIMIT,
+  LIST_DOCUMENTS_MAX_LIMIT,
+} from './types';
+
+const AGENT_DOCUMENT_ID_DESCRIPTION =
+  'Target agent document ID. Use the "id" field returned by listDocuments, not "documentId".';
 
 export const AgentDocumentsManifest: BuiltinToolManifest = {
   api: [
@@ -12,7 +20,26 @@ export const AgentDocumentsManifest: BuiltinToolManifest = {
       parameters: {
         properties: {
           content: {
-            description: 'Document content in markdown or plain text.',
+            description:
+              'Document content in Markdown. Put JSON, code or any text that must stay byte-exact inside a fenced code block (```json … ```); outside code, Markdown syntax such as `\\`, `__` or `*` is interpreted.',
+            type: 'string',
+          },
+          hintIsSkill: {
+            default: false,
+            description:
+              'Set true only when the document captures reusable procedural knowledge or durable agent behavior.',
+            type: 'boolean',
+          },
+          parentId: {
+            description:
+              'Parent folder document ID. Use the "documentId" field returned for a folder by listDocuments. Omit to create at the root.',
+            type: 'string',
+          },
+          scope: {
+            default: 'agent',
+            description:
+              'Where to create the document. Use currentTopic to associate it with the current topic; defaults to agent-scoped documents.',
+            enum: ['agent', 'currentTopic'],
             type: 'string',
           },
           title: {
@@ -23,16 +50,37 @@ export const AgentDocumentsManifest: BuiltinToolManifest = {
         required: ['title', 'content'],
         type: 'object',
       },
+      work: {
+        action: 'create',
+        resourceType: 'document',
+      },
     },
     {
       description:
-        'Read an existing agent document by ID (similar intent to cat/read operation). Use this before edits or deletes when needed.',
+        'Read an existing agent document by ID. Prefer XML format before node-level edits because XML includes stable node IDs. Long documents are returned one window at a time; a partial read ends with the offset to continue from.',
       name: AgentDocumentsApiName.readDocument,
       parameters: {
         properties: {
-          id: {
-            description: 'Target document ID.',
+          format: {
+            default: 'xml',
+            description:
+              'The format to return. Use "xml" for node-level edits, "markdown" for plain text, or "both". Defaults to "xml".',
+            enum: ['xml', 'markdown', 'both'],
             type: 'string',
+          },
+          id: {
+            description: AGENT_DOCUMENT_ID_DESCRIPTION,
+            type: 'string',
+          },
+          limit: {
+            description:
+              'Maximum number of lines to return. Omit to read as much as fits in one response.',
+            type: 'integer',
+          },
+          offset: {
+            description:
+              '1-based line to start reading from. Use the offset given at the end of a partial read to continue.',
+            type: 'integer',
           },
         },
         required: ['id'],
@@ -41,21 +89,93 @@ export const AgentDocumentsManifest: BuiltinToolManifest = {
     },
     {
       description:
-        'Edit an existing agent document content by ID. Use this for content changes, not title rename.',
-      name: AgentDocumentsApiName.editDocument,
+        'Replace the entire content of an existing agent document by ID. Use this only when overwriting most or all of the document. Prefer modifyNodes for targeted edits.',
+      name: AgentDocumentsApiName.replaceDocumentContent,
       parameters: {
         properties: {
           content: {
-            description: 'Updated full document content.',
+            description:
+              'New full document content in Markdown. Put JSON, code or any text that must stay byte-exact inside a fenced code block (```json … ```).',
             type: 'string',
           },
           id: {
-            description: 'Target document ID.',
+            description: AGENT_DOCUMENT_ID_DESCRIPTION,
             type: 'string',
           },
         },
         required: ['id', 'content'],
         type: 'object',
+      },
+      work: {
+        action: 'update',
+        resourceType: 'document',
+      },
+    },
+    {
+      description:
+        'Perform LiteXML node operations (insert, modify, remove) on an agent document by ID. Use this for content edits after reading the document in XML format.',
+      name: AgentDocumentsApiName.modifyNodes,
+      parameters: {
+        properties: {
+          id: {
+            description: AGENT_DOCUMENT_ID_DESCRIPTION,
+            type: 'string',
+          },
+          operations: {
+            description:
+              'Array of node operations. For insert, provide beforeId or afterId plus LiteXML without an id. For modify, provide LiteXML with existing node IDs. For remove, provide the node id.',
+            items: {
+              oneOf: [
+                {
+                  properties: {
+                    action: { const: 'insert', type: 'string' },
+                    beforeId: { description: 'ID of the node to insert before.', type: 'string' },
+                    litexml: { description: 'LiteXML node to insert.', type: 'string' },
+                  },
+                  required: ['action', 'beforeId', 'litexml'],
+                  type: 'object',
+                },
+                {
+                  properties: {
+                    action: { const: 'insert', type: 'string' },
+                    afterId: { description: 'ID of the node to insert after.', type: 'string' },
+                    litexml: { description: 'LiteXML node to insert.', type: 'string' },
+                  },
+                  required: ['action', 'afterId', 'litexml'],
+                  type: 'object',
+                },
+                {
+                  properties: {
+                    action: { const: 'modify', type: 'string' },
+                    litexml: {
+                      description:
+                        'LiteXML string or array of strings with existing node IDs to update.',
+                      oneOf: [{ type: 'string' }, { items: { type: 'string' }, type: 'array' }],
+                    },
+                  },
+                  required: ['action', 'litexml'],
+                  type: 'object',
+                },
+                {
+                  properties: {
+                    action: { const: 'remove', type: 'string' },
+                    id: { description: 'ID of the node to remove.', type: 'string' },
+                  },
+                  required: ['action', 'id'],
+                  type: 'object',
+                },
+              ],
+            },
+            minItems: 1,
+            type: 'array',
+          },
+        },
+        required: ['id', 'operations'],
+        type: 'object',
+      },
+      work: {
+        action: 'update',
+        resourceType: 'document',
       },
     },
     {
@@ -64,12 +184,16 @@ export const AgentDocumentsManifest: BuiltinToolManifest = {
       parameters: {
         properties: {
           id: {
-            description: 'Target document ID.',
+            description: AGENT_DOCUMENT_ID_DESCRIPTION,
             type: 'string',
           },
         },
         required: ['id'],
         type: 'object',
+      },
+      work: {
+        action: 'delete',
+        resourceType: 'document',
       },
     },
     {
@@ -79,7 +203,7 @@ export const AgentDocumentsManifest: BuiltinToolManifest = {
       parameters: {
         properties: {
           id: {
-            description: 'Target document ID.',
+            description: AGENT_DOCUMENT_ID_DESCRIPTION,
             type: 'string',
           },
           newTitle: {
@@ -89,6 +213,10 @@ export const AgentDocumentsManifest: BuiltinToolManifest = {
         },
         required: ['id', 'newTitle'],
         type: 'object',
+      },
+      work: {
+        action: 'update',
+        resourceType: 'document',
       },
     },
     {
@@ -108,6 +236,48 @@ export const AgentDocumentsManifest: BuiltinToolManifest = {
         required: ['id'],
         type: 'object',
       },
+      work: {
+        action: 'create',
+        resourceType: 'document',
+      },
+    },
+    {
+      description:
+        "List agent documents (this agent's own notes/skills/structured docs). Use this to discover documents that are not auto-injected (e.g. web-crawled pages), to expand a folder collapsed in the agent_documents_index, or to resolve a title to a document ID. Do NOT use this to find the user's uploaded files (PDFs, images, general uploads) — those live in the resource library and are covered by the Knowledge Base tool's listFiles, not here.",
+      name: AgentDocumentsApiName.listDocuments,
+      parameters: {
+        properties: {
+          limit: {
+            description: `Maximum number of documents to return (default ${LIST_DOCUMENTS_DEFAULT_LIMIT}, max ${LIST_DOCUMENTS_MAX_LIMIT}).`,
+            type: 'number',
+          },
+          offset: {
+            description:
+              'Number of documents to skip. Use the offset given at the end of a truncated listing to fetch the next page.',
+            type: 'number',
+          },
+          parentId: {
+            description:
+              'Restrict the listing to the direct children of this folder. Pass the folder id shown on a collapsed 📁 row in the agent_documents_index to expand that folder.',
+            type: 'string',
+          },
+          scope: {
+            default: 'agent',
+            description:
+              'Which document set to list. Defaults to "agent" (all agent-scoped documents). Use "currentTopic" to filter to documents associated with the current topic.',
+            enum: ['agent', 'currentTopic'],
+            type: 'string',
+          },
+          sourceType: {
+            default: 'all',
+            description: `Filter by document source within this agent-document system (unrelated to the user's resource library uploads). "file" = every non-web agent document (authored or edited as agent documents, plus uploaded originals); "web" = crawled from external URLs; "all" returns both. Web-crawled documents are hidden from the default agent_documents_index — pass sourceType="web" here to see them.`,
+            enum: ['all', 'file', 'web'],
+            type: 'string',
+          },
+        },
+        required: [],
+        type: 'object',
+      },
     },
     {
       description:
@@ -116,7 +286,7 @@ export const AgentDocumentsManifest: BuiltinToolManifest = {
       parameters: {
         properties: {
           id: {
-            description: 'Target document ID.',
+            description: AGENT_DOCUMENT_ID_DESCRIPTION,
             type: 'string',
           },
           rule: {
@@ -145,7 +315,7 @@ export const AgentDocumentsManifest: BuiltinToolManifest = {
   meta: {
     avatar: '🗂️',
     description:
-      'Manage agent-scoped documents (create/read/edit/remove/rename/copy) and load rules',
+      "Manage agent-scoped documents (list/create/read/edit/remove/rename/copy/upsert) and load rules. Not for the user's uploaded files — use the Knowledge Base tool for those.",
     title: 'Documents',
   },
   systemRole: systemPrompt,

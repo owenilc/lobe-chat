@@ -5,7 +5,7 @@ import {
   type ExperienceMemoryItemSchema,
   type PreferenceMemoryItemSchema,
   type RemoveIdentityActionSchema,
-  type UpdateIdentityActionSchema,
+  type UpdateIdentityToolInputSchema,
 } from '@lobechat/memory-user-memory/schemas';
 import {
   type ActivityListParams,
@@ -20,6 +20,8 @@ import {
   type IdentityListParams,
   type IdentityListResult,
   type LayersEnum,
+  type QueryTaxonomyOptionsParams,
+  type QueryTaxonomyOptionsResult,
   type RemoveIdentityMemoryResult,
   type SearchMemoryParams,
   type SearchMemoryResult,
@@ -123,6 +125,12 @@ class UserMemoryService {
     return lambdaClient.userMemories.queryIdentityRoles.query(params);
   };
 
+  queryTaxonomyOptions = async (
+    params?: QueryTaxonomyOptionsParams,
+  ): Promise<QueryTaxonomyOptionsResult> => {
+    return lambdaClient.userMemories.queryTaxonomyOptions.query(params);
+  };
+
   /**
    * Query identities for chat context injection
    * Only returns user's own identities (relationship === 'self' or null)
@@ -153,7 +161,7 @@ class UserMemoryService {
   };
 
   updateIdentityMemory = async (
-    params: z.infer<typeof UpdateIdentityActionSchema>,
+    params: z.output<typeof UpdateIdentityToolInputSchema>,
   ): Promise<UpdateIdentityMemoryResult> => {
     return lambdaClient.userMemories.toolUpdateIdentityMemory.mutate(params);
   };

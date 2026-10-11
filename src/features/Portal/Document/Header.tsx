@@ -1,83 +1,97 @@
 'use client';
 
-import { Button, Flexbox, Text } from '@lobehub/ui';
-import { cx } from 'antd-style';
-import { ExternalLink } from 'lucide-react';
-import { useState } from 'react';
+import { Flexbox, Icon } from '@lobehub/ui';
+import { Skeleton, Text } from '@lobehub/ui/base-ui';
+import { createStaticStyles, cssVar } from 'antd-style';
+import { ChevronRight } from 'lucide-react';
+import { memo } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate } from 'react-router-dom';
 
-import { documentService } from '@/services/document';
-import { useChatStore } from '@/store/chat';
-import { chatPortalSelectors } from '@/store/chat/selectors';
-import { useNotebookStore } from '@/store/notebook';
-import { notebookSelectors } from '@/store/notebook/selectors';
-import { oneLineEllipsis } from '@/styles';
-import { standardizeIdentifier } from '@/utils/identifier';
+import { usePortalDocumentTitleState } from './titleContext';
 
-import AutoSaveHint from './AutoSaveHint';
+const styles = createStaticStyles(({ css }) => ({
+  root: css`
+    min-width: 0;
+  `,
+  separator: css`
+    flex-shrink: 0;
+    color: ${cssVar.colorTextQuaternary};
+  `,
+  title: css`
+    font-size: 13px;
+    font-weight: 600;
+  `,
+  crumbButton: css`
+    cursor: pointer;
 
-const Header = () => {
-  const { t } = useTranslation('portal');
-  const navigate = useNavigate();
-  const [loading, setLoading] = useState(false);
+    flex-shrink: 0;
 
-  const [topicId, documentId] = useChatStore((s) => [
-    s.activeTopicId,
-    chatPortalSelectors.portalDocumentId(s),
-  ]);
+    padding: 0;
+    border: none;
 
-  const [useFetchDocuments, title, fileType] = useNotebookStore((s) => [
-    s.useFetchDocuments,
-    notebookSelectors.getDocumentById(topicId, documentId)(s)?.title,
-    notebookSelectors.getDocumentById(topicId, documentId)(s)?.fileType,
-  ]);
-  useFetchDocuments(topicId);
+    font-size: 13px;
+    color: ${cssVar.colorTextSecondary};
 
-  const handleOpenInPageEditor = async () => {
-    if (!documentId) return;
+    background: none;
 
-    setLoading(true);
-    try {
-      // Update fileType to custom/document so it appears in page list
-      await documentService.updateDocument({
-        fileType: 'custom/document',
-        id: documentId,
-      });
+    transition: color ${cssVar.motionDurationFast} ${cssVar.motionEaseInOut};
 
-      // Navigate to the page editor
-      // Note: /page route automatically adds 'docs_' prefix to the id
-      navigate(`/page/${standardizeIdentifier(documentId)}`);
-    } finally {
-      setLoading(false);
+    &:hover {
+      color: ${cssVar.colorText};
     }
-  };
 
-  if (!title) return null;
+    &:focus-visible {
+      border-radius: ${cssVar.borderRadiusSM};
+      outline: none;
+      box-shadow: 0 0 0 2px ${cssVar.colorPrimaryBorder};
+    }
+  `,
+  crumbLabel: css`
+    flex-shrink: 0;
+    font-size: 13px;
+  `,
+}));
+
+interface HeaderProps {
+  /** Navigate to the documents index on breadcrumb click (agent route has one). */
+  onOpenDocumentsIndex?: () => void;
+}
+
+const Header = memo<HeaderProps>(({ onOpenDocumentsIndex }) => {
+  const { t } = useTranslation('file');
+  const { isLoading, savedTitle, titleFallback } = usePortalDocumentTitleState();
+
+  if (isLoading) {
+    return <Skeleton height={16} width={180} />;
+  }
 
   return (
-    <Flexbox horizontal align={'center'} flex={1} gap={12} justify={'space-between'} width={'100%'}>
-      <Flexbox flex={1}>
-        <Text className={cx(oneLineEllipsis)} type={'secondary'}>
-          {title}
+    // Hug the title so the shared `…` rides right behind it.
+    <Flexbox horizontal align={'center'} className={styles.root} flex={'0 1 auto'} gap={4}>
+      {/* Navigable crumb gets a real button (keyboard reachable); a plain
+            notebook document renders a noninteractive label with no affordance. */}
+      {onOpenDocumentsIndex ? (
+        <button className={styles.crumbButton} type={'button'} onClick={onOpenDocumentsIndex}>
+          {t('menu.allPages', { ns: 'file' })}
+        </button>
+      ) : (
+        <Text className={styles.crumbLabel} color={cssVar.colorTextQuaternary}>
+          {t('menu.allPages', { ns: 'file' })}
         </Text>
-      </Flexbox>
-      <Flexbox horizontal align={'center'} gap={8}>
-        <AutoSaveHint />
-        {fileType !== 'agent/plan' && (
-          <Button
-            icon={<ExternalLink size={14} />}
-            loading={loading}
-            size={'small'}
-            type={'text'}
-            onClick={handleOpenInPageEditor}
-          >
-            {t('openInPageEditor')}
-          </Button>
-        )}
-      </Flexbox>
+      )}
+      <Icon className={styles.separator} icon={ChevronRight} size={14} />
+      {/* Display only — renaming goes through the `…` menu's dialog. */}
+      <Text
+        className={styles.title}
+        ellipsis={{ tooltip: savedTitle || titleFallback }}
+        style={{ minWidth: 0 }}
+      >
+        {savedTitle || titleFallback}
+      </Text>
     </Flexbox>
   );
-};
+});
+
+Header.displayName = 'PortalDocumentHeader';
 
 export default Header;

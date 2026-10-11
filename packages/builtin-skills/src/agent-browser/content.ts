@@ -1,158 +1,87 @@
 /**
- * @see https://github.com/vercel-labs/agent-browser/blob/main/skills/agent-browser/SKILL.md
+ * The agent-browser release the desktop app downloads
+ * (`apps/desktop/src/main/modules/binaries/agentBrowserBinaries.ts` `pinnedVersion`).
+ * The `npx` fallback below runs this same version; `content.test.ts` fails if the
+ * two drift apart.
  */
+export const AGENT_BROWSER_PINNED_VERSION = '0.31.1';
+
+const NPX_AGENT_BROWSER = `npx -y agent-browser@${AGENT_BROWSER_PINNED_VERSION}`;
+
 export const systemPrompt = `<agent_browser_guides>
-You can automate websites and Electron desktop apps with the agent-browser CLI. Use the \`execScript\` tool to run local shell commands.
+# agent-browser
 
-# Prerequisites
+\`agent-browser\` is a fast browser automation CLI for AI agents — drives Chrome/Chromium via CDP and serves accessibility-tree snapshots with compact \`@eN\` element refs (so you act on the page in a few hundred tokens, not raw HTML).
 
-The \`agent-browser\` CLI is bundled with the desktop app (v0.20.1) and runs in native mode by default. It automatically detects system Chrome/Chromium. If no browser is found, install Google Chrome.
+## Before the first command — check the CLI is available
 
-# Core Workflow (Snapshot-Ref Pattern)
-
-Use this 4-step loop for almost all tasks:
-
-1. Navigate: \`agent-browser open <url>\`
-2. Snapshot: \`agent-browser snapshot -i\` (returns refs like \`@e1\`, \`@e2\`)
-3. Interact: \`click\`, \`fill\`, \`select\`, etc. with refs
-4. Re-snapshot after page changes
-
-Refs are ephemeral. After navigation, form submit, modal open, or dynamic updates, old refs are invalid. Re-snapshot before the next interaction.
-
-# Command Chaining
-
-You can chain commands with \`&&\` in one shell call. The daemon preserves browser state across chained commands.
+The desktop app downloads \`agent-browser\` in the background, so it may be missing (first launch, offline, download failed) — and on other devices it may never have been installed. Check once before using it:
 
 \`\`\`bash
-agent-browser open https://example.com && agent-browser wait --load networkidle && agent-browser snapshot -i
+command -v agent-browser   # macOS / Linux
+where.exe agent-browser    # Windows (cmd or PowerShell)
 \`\`\`
 
-Chain only when you do not need to inspect intermediate output. If you must parse snapshot output to discover refs, run snapshot separately.
+- **Found** → use \`agent-browser\` as written below.
+- **Not found** (or a command fails with \`command not found\` / exit 127 / ENOENT) → if Node.js is available, run it through npx instead, and substitute this prefix for every \`agent-browser\` in the commands below (each command runs in a fresh shell, so repeat the full prefix):
+  \`\`\`bash
+  ${NPX_AGENT_BROWSER} open example.com
+  \`\`\`
+- **Neither works** (no \`npx\` either) → stop and tell the user \`agent-browser\` isn't installed on this device yet. The LobeHub desktop app retries the download on its next launch, and **Settings → System Tools → Browser Automation** shows whether it's been detected; they can also install it themselves with \`npm i -g agent-browser\` or \`brew install agent-browser\`. Don't hand-roll a replacement with curl/python scraping.
 
-# Essential Commands
+If a command fails because no browser is available, run \`agent-browser install\` (same prefix) once to download Chrome for Testing, then retry.
 
-## Navigation
-- \`agent-browser open <url>\`
-- \`agent-browser close\`
-- \`agent-browser back\`
-- \`agent-browser forward\`
-- \`agent-browser reload\`
-
-## Snapshot and Capture
-- \`agent-browser snapshot -i\` (recommended)
-- \`agent-browser snapshot -i -C\` (include cursor-interactive elements)
-- \`agent-browser screenshot\`
-- \`agent-browser screenshot --annotate\`
-- \`agent-browser screenshot --full\`
-- \`agent-browser pdf output.pdf\`
-
-## Interaction
-- \`agent-browser click @e1\`
-- \`agent-browser fill @e2 "text"\`
-- \`agent-browser type @e2 "text"\`
-- \`agent-browser select @e3 "option"\`
-- \`agent-browser check @e4\`
-- \`agent-browser press Enter\`
-- \`agent-browser scroll down 500\`
-
-## Retrieval
-- \`agent-browser get text @e1\`
-- \`agent-browser get url\`
-- \`agent-browser get title\`
-
-## Wait
-- \`agent-browser wait @e1\`
-- \`agent-browser wait --load networkidle\`
-- \`agent-browser wait --url "**/dashboard"\`
-- \`agent-browser wait 2000\`
-
-## Diff and Verification
-- \`agent-browser diff snapshot\`
-- \`agent-browser diff screenshot --baseline before.png\`
-- \`agent-browser diff url <url1> <url2>\`
-
-## Session and State
-- \`agent-browser --session <name> open <url>\`
-- \`agent-browser session list\`
-- \`agent-browser state save auth.json\`
-- \`agent-browser state load auth.json\`
-
-## Chrome or Electron Connection
-
-To control an existing Chrome or Electron app, it must be launched with remote debugging enabled. If the app is already running, quit it first, then relaunch with the flag:
-
-**macOS (Chrome):**
-\`\`\`bash
-open -a "Google Chrome" --args --remote-debugging-port=9222
-\`\`\`
-
-**macOS (Electron app, e.g. Slack):**
-\`\`\`bash
-open -a "Slack" --args --remote-debugging-port=9222
-\`\`\`
-
-Then connect and control:
-- \`agent-browser --auto-connect snapshot -i\`
-- \`agent-browser --cdp 9222 snapshot -i\`
-- \`agent-browser connect 9222\`
-
-# Common Patterns
-
-## Form Submission
-\`\`\`bash
-agent-browser open https://example.com/signup
-agent-browser snapshot -i
-agent-browser fill @e1 "Jane Doe"
-agent-browser fill @e2 "jane@example.com"
-agent-browser click @e3
-agent-browser wait --load networkidle
-agent-browser snapshot -i
-\`\`\`
-
-## Data Extraction
-\`\`\`bash
-agent-browser open https://example.com/products
-agent-browser wait --load networkidle
-agent-browser snapshot -i
-agent-browser get text @e5
-\`\`\`
-
-## Annotated Screenshot for Vision Tasks
-\`\`\`bash
-agent-browser screenshot --annotate
-agent-browser click @e2
-\`\`\`
-
-## Authentication (Auth Vault)
-\`\`\`bash
-echo "pass" | agent-browser auth save github --url https://github.com/login --username user --password-stdin
-agent-browser auth login github
-\`\`\`
-
-# Security Controls (Opt-In)
-
-- Content boundaries: \`AGENT_BROWSER_CONTENT_BOUNDARIES=1\`
-- Domain allowlist: \`AGENT_BROWSER_ALLOWED_DOMAINS="example.com,*.example.com"\`
-- Action policy: \`AGENT_BROWSER_ACTION_POLICY=./policy.json\`
-- Output limits: \`AGENT_BROWSER_MAX_OUTPUT=50000\`
-
-Use allowlists and policies when tasks involve unknown pages or potentially destructive actions.
-
-# JavaScript Evaluation Notes
-
-For complex JavaScript, use stdin mode to avoid shell quoting issues:
+## The core loop
 
 \`\`\`bash
-agent-browser eval --stdin <<'EVALEOF'
-JSON.stringify(Array.from(document.querySelectorAll("a")).map((a) => a.href))
-EVALEOF
+agent-browser open example.com
+agent-browser snapshot -i                 # accessibility tree with interactive refs (@e1, @e2, …)
+agent-browser click @e2                   # click by ref
+agent-browser fill @e3 "test@example.com" # clear and fill by ref
+agent-browser get text @e1                # get text by ref
+agent-browser screenshot page.png
+agent-browser close
 \`\`\`
 
-# Execution Rules in This Runtime
+Refs become **stale on every page change** (click that navigates, form submit, dynamic re-render, dialog open). Always re-snapshot before the next ref interaction.
 
-- Run all agent-browser commands via \`execScript\` with \`runInClient: true\` because it is a local CLI.
-- Prefer \`--json\` output when structured parsing is needed.
-- Always close sessions when done: \`agent-browser close\` (or named session close).
-- If a task stalls, use explicit wait commands instead of blind retries.
-</agent_browser_guides>
-`;
+If a page opens to an empty body or a verification/challenge screen, treat it as a block, not a slow load — go straight to the real-Chrome step below.
+
+If a page requires signing in (a login form, an account/password wall, or an OTP/verification step you have no credentials for), don't guess credentials or engineer a way around the gate. Open it in a visible browser — the real-Chrome CDP window below is one — ask the user to sign in themselves in that window, and continue once they confirm.
+
+When the task is done — every time, as the final step and without waiting to be asked — run \`agent-browser close\` and quit any Chrome you launched for CDP. A browser you opened for the task otherwise keeps running on the user's machine. See the teardown rule below for how to quit the CDP Chrome without touching the user's own browser.
+
+## Blocked pages — escalate to real Chrome
+
+Empty body, verification screen, or obfuscated JS means the page is **blocked, not loading**. This is a binary decision: got real text → proceed; no text → switch to real Chrome immediately.
+
+1. **Verify once** — \`agent-browser open <url>\`, then \`agent-browser wait --fn "document.body.innerText.length > 100" --timeout 3000\`. If it succeeds, page is usable — continue.
+2. **Timed out → launch real Chrome over CDP.** Its human fingerprint bypasses JS challenges:
+   \`\`\`bash
+   # macOS:
+   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \\
+     --remote-debugging-port=9222 --user-data-dir="$HOME/.agent-browser-cdp" &
+   # Linux (binary may be \`google-chrome-stable\`, \`chromium\` or \`chromium-browser\` — check with \`command -v\`):
+   #   google-chrome --remote-debugging-port=9222 --user-data-dir="$HOME/.agent-browser-cdp" &
+   # Windows (PowerShell):
+   #   Start-Process "$env:ProgramFiles\\Google\\Chrome\\Application\\chrome.exe" -ArgumentList '--remote-debugging-port=9222',"--user-data-dir=$env:USERPROFILE\\.agent-browser-cdp"
+   agent-browser --cdp 9222 open <url>
+   agent-browser --cdp 9222 wait --fn "document.body.innerText.length > 100" --timeout 3000
+   agent-browser --cdp 9222 read              # read rendered DOM as clean markdown
+   # when done, close the CDP Chrome (it keeps running otherwise):
+   agent-browser --cdp 9222 close
+   pkill -f "user-data-dir=$HOME/.agent-browser-cdp"  # macOS / Linux: kill only the automation instance
+   # Windows (PowerShell):
+   #   Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" | Where-Object { $_.CommandLine -like '*agent-browser-cdp*' } | ForEach-Object { Stop-Process -Id $_.ProcessId }
+   \`\`\`
+
+**Once you switch, commit to real Chrome.** Do not loop back to retry headless, sleep-and-reload, switch to \`--headed\` (same automation browser, not an escalation), or hand-roll the bypass (reversing challenge JS, computing clearance cookies via curl/python/node). Real Chrome is the general answer.
+
+**Recognizing JS-challenge blocks:** a challenge cookie (\`cf_clearance\`, \`*_jsl_clearance*\`, \`acw_tc\`, …) next to an empty body confirms the block. The same cookie next to real content means the challenge already passed — keep the session. For large page output, dump to a file first and inspect with \`grep\`/\`head\`.
+
+**Teardown safety:** \`agent-browser --cdp 9222 close\` only disconnects — the Chrome process stays alive, so always \`pkill\` by the \`user-data-dir\` marker. Do NOT match \`--remote-debugging-port=9222\` alone (may hit the user's own debugging Chrome). NEVER \`pkill -f "Google Chrome"\` or \`killall "Google Chrome"\` — these kill the user's everyday browser.
+
+## Discovering everything else
+
+Run \`agent-browser --help\` for the full command list, then \`agent-browser <subcommand> --help\` for any subcommand whose flags you're unsure about. The CLI also ships specialized skills (\`agent-browser skills list\`, \`agent-browser skills get <name>\`) covering Electron apps, Slack, dogfooding, Vercel Sandbox, and AWS Bedrock AgentCore — load one only when the task falls outside ordinary web pages. Those docs are command references; the real-Chrome rule above still governs how you respond to blocked pages.
+</agent_browser_guides>`;

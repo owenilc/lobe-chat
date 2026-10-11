@@ -1,13 +1,14 @@
 'use client';
 
 import { type IEditor, type SlashOptions } from '@lobehub/editor';
-import { type ChatInputActionsProps, type Editor } from '@lobehub/editor/react';
+import type { ChatInputActionsProps, Editor, EditorProps } from '@lobehub/editor/react';
 import { type CSSProperties } from 'react';
 import { memo } from 'react';
 
+import SafeBoundary from '@/components/ErrorBoundary';
+
 import DocumentIdMode from './DocumentIdMode';
 import EditorDataMode from './EditorDataMode';
-import { EditorErrorBoundary } from './ErrorBoundary';
 import InternalEditor from './InternalEditor';
 
 /**
@@ -36,16 +37,54 @@ interface UnsavedChangesGuardOptions {
 
 export interface EditorCanvasProps {
   /**
+   * Allow block plugins to render outside the editor's normal text column.
+   * Keep disabled for compact editor surfaces; PageEditor enables it for wide
+   * table scroll areas and their resize controls.
+   */
+  allowContentBleed?: boolean;
+
+  /**
    * Whether to enable auto-save in DocumentStore. Defaults to true.
    * Only applies when documentId is provided.
    */
   autoSave?: boolean;
 
   /**
+   * Keep the caret out of Lexical's root node around block images by pushing
+   * an empty paragraph next to the image (otherwise a horizontal root-level
+   * caret shows above / below it). Off by default; comment editors opt in.
+   */
+  blockImageCaretGuard?: boolean;
+
+  /**
+   * Class name applied to the editor wrapper, e.g. to restyle inline chips.
+   */
+  className?: string;
+
+  /**
+   * Reload an already-mounted editor when an authoritative external content
+   * revision changes. Keep this stable for local autosave echoes and unchanged
+   * refetches so unsaved input is never replaced by prop identity churn.
+   */
+  contentRevision?: number;
+
+  /** Styles applied to the editable content instead of the outer data-mode wrapper. */
+  contentStyle?: CSSProperties;
+
+  disabled?: boolean;
+
+  /**
    * Document ID to load from server.
    * When provided, component will use useSWR to fetch document data.
    */
   documentId?: string;
+
+  /**
+   * Whether the editor accepts input. Defaults to true. Set false to render
+   * the content read-only (still preserves Lexical-node attributes like image
+   * width/height, which a plain markdown renderer would drop).
+   */
+  editable?: boolean;
 
   /**
    * Editor data to render directly (skip fetch).
@@ -55,6 +94,13 @@ export interface EditorCanvasProps {
     content?: string;
     editorData?: unknown;
   };
+
+  /**
+   * Convert `$...$` input and Markdown inline-math tokens into formula nodes.
+   * Defaults to true. PageEditor disables this because business documents use
+   * dollar signs far more often than inline formulas.
+   */
+  enableInlineMath?: boolean;
 
   /**
    * Entity ID (e.g., agentId, groupId) to track which entity is being edited.
@@ -74,6 +120,12 @@ export interface EditorCanvasProps {
    */
   floatingToolbar?: boolean;
 
+  /** Resolve the portal host used by slash and mention menus. */
+  getPopupContainer?: EditorProps['getPopupContainer'];
+
+  /** Structured @mention configuration forwarded to the editor. */
+  mentionOption?: EditorProps['mentionOption'];
+
   /**
    * Content change handler
    */
@@ -85,6 +137,12 @@ export interface EditorCanvasProps {
   onInit?: (editor: IEditor) => void;
 
   /**
+   * Press-enter handler. Return true to claim the event (suppresses newline).
+   * Forwarded to the underlying Editor.
+   */
+  onPressEnter?: (props: { editor: IEditor; event: KeyboardEvent }) => boolean | void;
+
+  /**
    * Placeholder text for empty editor
    */
   placeholder?: string;
@@ -94,6 +152,15 @@ export interface EditorCanvasProps {
    * Use this when you need complete control over plugins.
    */
   plugins?: EditorPlugins;
+
+  /**
+   * Selection actions that stay available while the editor is NOT editable
+   * (locked or view-only page). They render in a floating toolbar of their
+   * own with no formatting controls, so a reader can still act on a selection
+   * — comment on it, ask about it — without being offered edits that would
+   * never save. Ignored while editable; use `toolbarExtraItems` there.
+   */
+  readonlySelectionItems?: ChatInputActionsProps['items'];
 
   /**
    * Slash menu items
@@ -114,6 +181,12 @@ export interface EditorCanvasProps {
    * Extra items to add to the floating toolbar (e.g., "Ask Copilot" button)
    */
   toolbarExtraItems?: ChatInputActionsProps['items'];
+
+  /**
+   * Topic ID for notebook documents.
+   * Used to preserve active topic document context after leaving the page route.
+   */
+  topicId?: string | null;
 
   /**
    * Unsaved changes guard for documentId mode.
@@ -148,18 +221,18 @@ export const EditorCanvas = memo<EditorCanvasWithEditorProps>(
     // documentId mode - fetch and render with loading/error states
     if (documentId) {
       return (
-        <EditorErrorBoundary>
+        <SafeBoundary alertTitle="Editor Error" variant="alert">
           <DocumentIdMode documentId={documentId} editor={editor} {...props} />
-        </EditorErrorBoundary>
+        </SafeBoundary>
       );
     }
 
     // editorData mode - render with provided data
     if (editorData) {
       return (
-        <EditorErrorBoundary>
+        <SafeBoundary alertTitle="Editor Error" variant="alert">
           <EditorDataMode editor={editor} editorData={editorData} entityId={entityId} {...props} />
-        </EditorErrorBoundary>
+        </SafeBoundary>
       );
     }
 
@@ -167,9 +240,9 @@ export const EditorCanvas = memo<EditorCanvasWithEditorProps>(
     if (!editor) return null;
 
     return (
-      <EditorErrorBoundary>
+      <SafeBoundary alertTitle="Editor Error" variant="alert">
         <InternalEditor editor={editor} {...props} />
-      </EditorErrorBoundary>
+      </SafeBoundary>
     );
   },
 );

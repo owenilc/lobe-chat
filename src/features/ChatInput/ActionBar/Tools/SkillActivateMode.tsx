@@ -1,4 +1,5 @@
-import { Icon, Segmented } from '@lobehub/ui';
+import { Icon, Tooltip } from '@lobehub/ui';
+import { Tabs } from '@lobehub/ui/base-ui';
 import { SlidersHorizontal, Sparkles } from 'lucide-react';
 import { memo } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -18,23 +19,29 @@ const SkillActivateMode = memo(() => {
   );
 
   return (
-    <Segmented
+    <Tabs
+      activeKey={currentMode}
       size="small"
-      value={currentMode}
-      options={[
+      items={[
         {
-          icon: <Icon icon={Sparkles} />,
-          title: t('tools.skillActivateMode.auto.desc'),
-          value: 'auto',
+          key: 'auto',
+          label: (
+            <Tooltip title={t('tools.skillActivateMode.auto.desc')}>
+              <Icon icon={Sparkles} />
+            </Tooltip>
+          ),
         },
         {
-          icon: <Icon icon={SlidersHorizontal} />,
-          title: t('tools.skillActivateMode.manual.desc'),
-          value: 'manual',
+          key: 'manual',
+          label: (
+            <Tooltip title={t('tools.skillActivateMode.manual.desc')}>
+              <Icon icon={SlidersHorizontal} />
+            </Tooltip>
+          ),
         },
       ]}
-      onChange={async (value) => {
-        await updateAgentChatConfig({ skillActivateMode: value as 'auto' | 'manual' });
+      onChange={async (key) => {
+        await updateAgentChatConfig({ skillActivateMode: key as 'auto' | 'manual' });
       }}
     />
   );

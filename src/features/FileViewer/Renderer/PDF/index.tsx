@@ -4,9 +4,9 @@ import 'react-pdf/dist/Page/AnnotationLayer.css';
 import 'react-pdf/dist/Page/TextLayer.css';
 
 import { Flexbox } from '@lobehub/ui';
+import { Spin } from '@lobehub/ui/base-ui';
 import { Fragment, memo, useCallback, useState } from 'react';
 
-import NeuralNetworkLoading from '@/components/NeuralNetworkLoading';
 import { Document, Page, pdfjs } from '@/libs/pdfjs';
 import { lambdaQuery } from '@/libs/trpc/client';
 
@@ -21,7 +21,7 @@ const options = {
 
 const maxWidth = 1200;
 
-interface PDFViewerProps {
+export interface PDFViewerProps {
   fileId: string;
   url: string | null;
 }
@@ -32,7 +32,6 @@ const PDFViewer = memo<PDFViewerProps>(({ url, fileId }) => {
   const [containerWidth, setContainerWidth] = useState<number>();
   const [isLoaded, setIsLoaded] = useState(false);
 
-   
   const onResize = useCallback<ResizeObserverCallback>((entries) => {
     const [entry] = entries;
 
@@ -67,7 +66,7 @@ const PDFViewer = memo<PDFViewerProps>(({ url, fileId }) => {
         <Document
           className={styles.document}
           file={url}
-          loading={<NeuralNetworkLoading size={36} />}
+          loading={<Spin size="large" />}
           options={options}
           onLoadSuccess={onDocumentLoadSuccess}
         >

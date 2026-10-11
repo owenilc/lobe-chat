@@ -10,55 +10,70 @@ import type {
 } from '../types/agent.type';
 
 /**
- * Agent 控制器类
- * 处理 Agent 相关的 HTTP 请求和响应
+ * Agent controller class
+ * Handles Agent-related HTTP requests and responses
  */
 export class AgentController extends BaseController {
+  async duplicateAgent(c: Context) {
+    try {
+      const { id } = this.getParams<{ id: string }>(c);
+      const body = await this.getBody<{ title?: string }>(c);
+      const service = new AgentService(
+        await this.getDatabase(),
+        this.getUserId(c)!,
+        this.getWorkspaceId(c),
+      );
+      return this.success(c, await service.duplicateAgent(id, body.title), 'Agent duplicated', 201);
+    } catch (error) {
+      return this.handleError(c, error);
+    }
+  }
+
   /**
-   * 获取系统中所有的 Agent 列表
+   * Retrieves a list of all Agents in the system
    * GET /api/v1/agents/list
    * @param c Hono Context
-   * @returns Agent 列表响应
+   * @returns Agent list response
    */
   async queryAgents(c: Context): Promise<Response> {
     try {
       const request = await this.getQuery<GetAgentsRequest>(c);
 
       const db = await this.getDatabase();
-      const agentService = new AgentService(db, this.getUserId(c));
+      const agentService = new AgentService(db, this.getUserId(c), this.getWorkspaceId(c));
       const agentsList = await agentService.queryAgents(request);
 
-      return this.success(c, agentsList, '获取 Agent 列表成功');
+      return this.success(c, agentsList, 'Agent list retrieved successfully');
     } catch (error) {
       return this.handleError(c, error);
     }
   }
 
   /**
-   * 创建智能体
+   * Creates an agent
    * POST /api/v1/agents/create
    * @param c Hono Context
-   * @returns 创建完成的 Agent 信息响应
+   * @returns Created Agent information response
    */
   async createAgent(c: Context): Promise<Response> {
     try {
       const body = await this.getBody<CreateAgentRequest>(c);
 
       const db = await this.getDatabase();
-      const agentService = new AgentService(db, this.getUserId(c));
+      const agentService = new AgentService(db, this.getUserId(c), this.getWorkspaceId(c));
       const createdAgent = await agentService.createAgent(body);
 
-      return this.success(c, createdAgent, 'Agent 创建成功');
+      return this.success(c, createdAgent, 'Agent created successfully');
     } catch (error) {
       return this.handleError(c, error);
     }
   }
 
   /**
-   * 更新智能体
+   * Updates an agent
    * PUT /api/v1/agents/:id
    * @param c Hono Context
-   * @returns 更新后的 Agent 信息响应
+   * @returns Updated Agent information response
    */
   async updateAgent(c: Context): Promise<Response> {
     try {
@@ -71,20 +86,20 @@ export class AgentController extends BaseController {
       };
 
       const db = await this.getDatabase();
-      const agentService = new AgentService(db, this.getUserId(c));
+      const agentService = new AgentService(db, this.getUserId(c), this.getWorkspaceId(c));
       const updatedAgent = await agentService.updateAgent(updateRequest);
 
-      return this.success(c, updatedAgent, 'Agent 更新成功');
+      return this.success(c, updatedAgent, 'Agent updated successfully');
     } catch (error) {
       return this.handleError(c, error);
     }
   }
 
   /**
-   * 删除智能体
+   * Deletes an agent
    * DELETE /api/v1/agents/delete
    * @param c Hono Context
-   * @returns 删除结果响应
+   * @returns Deletion result response
    */
   async deleteAgent(c: Context): Promise<Response> {
     try {
@@ -92,33 +107,33 @@ export class AgentController extends BaseController {
       const request: AgentDeleteRequest = { agentId: id };
 
       const db = await this.getDatabase();
-      const agentService = new AgentService(db, this.getUserId(c));
+      const agentService = new AgentService(db, this.getUserId(c), this.getWorkspaceId(c));
       await agentService.deleteAgent(request);
 
-      return this.success(c, null, 'Agent 删除成功');
+      return this.success(c, null, 'Agent deleted successfully');
     } catch (error) {
       return this.handleError(c, error);
     }
   }
 
   /**
-   * 根据 ID 获取 Agent 详情
+   * Retrieves Agent details by ID
    * GET /api/v1/agents/:id
    * @param c Hono Context
-   * @returns Agent 详情响应
+   * @returns Agent detail response
    */
   async getAgentById(c: Context): Promise<Response> {
     try {
       const { id: agentId } = this.getParams<{ id: string }>(c);
       const db = await this.getDatabase();
-      const agentService = new AgentService(db, this.getUserId(c));
+      const agentService = new AgentService(db, this.getUserId(c), this.getWorkspaceId(c));
       const agent = await agentService.getAgentById(agentId);
 
       if (!agent) {
-        return this.error(c, 'Agent 不存在', 404);
+        return this.error(c, 'Agent not found', 404);
       }
 
-      return this.success(c, agent, '获取 Agent 详情成功');
+      return this.success(c, agent, 'Agent details retrieved successfully');
     } catch (error) {
       return this.handleError(c, error);
     }

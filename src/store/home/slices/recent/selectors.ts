@@ -1,18 +1,14 @@
 import { type HomeStore } from '@/store/home/store';
 
-const recentTopics = (s: HomeStore) => s.recentTopics;
-const recentResources = (s: HomeStore) => s.recentResources;
-const recentPages = (s: HomeStore) => s.recentPages;
+import { type RecentEntityRef, toRecentEntityRef } from './initialState';
 
-const isRecentTopicsInit = (s: HomeStore) => s.isRecentTopicsInit;
-const isRecentResourcesInit = (s: HomeStore) => s.isRecentResourcesInit;
-const isRecentPagesInit = (s: HomeStore) => s.isRecentPagesInit;
+/** Items of one recents query; `undefined` until it is hydrated or fetched. */
+const query = (queryKey: string) => (s: HomeStore) => s.recentListMap[queryKey];
+
+const item = (queryKey: string, ref: RecentEntityRef) => (s: HomeStore) =>
+  s.recentListMap[queryKey]?.find((recent) => toRecentEntityRef(recent) === ref);
 
 export const homeRecentSelectors = {
-  isRecentPagesInit,
-  isRecentResourcesInit,
-  isRecentTopicsInit,
-  recentPages,
-  recentResources,
-  recentTopics,
+  item,
+  query,
 };

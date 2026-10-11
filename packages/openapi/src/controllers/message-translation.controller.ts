@@ -10,7 +10,7 @@ import type {
 
 export class MessageTranslationController extends BaseController {
   /**
-   * 获取指定消息的翻译信息
+   * Retrieves translation information for a specific message
    * GET /api/v1/message_translates/:messageId
    * Param: { messageId: string }
    */
@@ -20,17 +20,17 @@ export class MessageTranslationController extends BaseController {
       const { messageId } = this.getParams<{ messageId: string }>(c);
 
       const db = await this.getDatabase();
-      const translateService = new MessageTranslateService(db, userId);
+      const translateService = new MessageTranslateService(db, userId, this.getWorkspaceId(c));
       const translate = await translateService.getTranslateByMessageId(messageId);
 
-      return this.success(c, translate, '获取翻译信息成功');
+      return this.success(c, translate, 'Translation info retrieved successfully');
     } catch (error) {
       return this.handleError(c, error);
     }
   }
 
   /**
-   * 翻译指定消息
+   * Translates a specific message
    * POST /api/v1/message_translates/:messageId
    * Body: { from?: string, to: string }
    */
@@ -41,20 +41,20 @@ export class MessageTranslationController extends BaseController {
       const translatePayload = (await this.getBody<MessageTranslateBody>(c))!;
 
       const db = await this.getDatabase();
-      const translateService = new MessageTranslateService(db, userId);
+      const translateService = new MessageTranslateService(db, userId, this.getWorkspaceId(c));
       const result = await translateService.translateMessage({
         messageId,
         ...translatePayload,
       });
 
-      return this.success(c, result, '翻译消息成功');
+      return this.success(c, result, 'Message translated successfully');
     } catch (error) {
       return this.handleError(c, error);
     }
   }
 
   /**
-   * 更新消息翻译信息
+   * Updates message translation information
    * PUT /api/v1/message-translates/:messageId
    * Body: { from: string, to: string, content: string }
    */
@@ -65,17 +65,17 @@ export class MessageTranslationController extends BaseController {
       const configData = (await this.getBody<MessageTranslateInfoUpdate>(c))!;
 
       const db = await this.getDatabase();
-      const translateService = new MessageTranslateService(db, userId);
+      const translateService = new MessageTranslateService(db, userId, this.getWorkspaceId(c));
       const result = await translateService.updateTranslateInfo({ ...configData, messageId });
 
-      return this.success(c, result, '更新翻译信息成功');
+      return this.success(c, result, 'Translation info updated successfully');
     } catch (error) {
       return this.handleError(c, error);
     }
   }
 
   /**
-   * 删除消息的翻译信息
+   * Deletes translation information for a message
    * DELETE /api/v1/message-translates/:messageId
    */
   async handleDeleteTranslate(c: Context) {
@@ -84,10 +84,10 @@ export class MessageTranslationController extends BaseController {
       const { messageId } = this.getParams<{ messageId: string }>(c);
 
       const db = await this.getDatabase();
-      const translateService = new MessageTranslateService(db, userId);
+      const translateService = new MessageTranslateService(db, userId, this.getWorkspaceId(c));
       const result = await translateService.deleteTranslateByMessageId(messageId);
 
-      return this.success(c, result, '删除翻译信息成功');
+      return this.success(c, result, 'Translation info deleted successfully');
     } catch (error) {
       return this.handleError(c, error);
     }

@@ -1,7 +1,7 @@
 'use client';
 
 import { Center } from '@lobehub/ui';
-import { App } from 'antd';
+import { toast } from '@lobehub/ui/base-ui';
 import { createStaticStyles, cssVar, cx } from 'antd-style';
 import { Image as ImageIcon, X } from 'lucide-react';
 import { type FC } from 'react';
@@ -213,7 +213,7 @@ const isLocalBlobUrl = (url: string): boolean => url.startsWith('blob:');
 // ======== Sub-Components ======== //
 
 /**
- * 圆形进度条组件 (复用自 MultiImagesUpload)
+ * Circular progress bar component (reused from MultiImagesUpload)
  */
 interface CircularProgressProps {
   showText?: boolean; // 0-100
@@ -303,7 +303,7 @@ const CircularProgress: FC<CircularProgressProps> = memo(
 CircularProgress.displayName = 'CircularProgress';
 
 /**
- * 占位视图组件
+ * Placeholder view component
  */
 interface PlaceholderProps {
   height?: number;
@@ -340,7 +340,7 @@ const Placeholder: FC<PlaceholderProps> = memo(({ isDragOver, onClick, height })
 Placeholder.displayName = 'Placeholder';
 
 /**
- * 上传中视图组件
+ * Uploading view component
  */
 interface UploadingDisplayProps {
   previewUrl: string;
@@ -367,7 +367,7 @@ const UploadingDisplay: FC<UploadingDisplayProps> = memo(({ previewUrl, progress
 UploadingDisplay.displayName = 'UploadingDisplay';
 
 /**
- * 成功视图组件
+ * Success view component
  */
 interface SuccessDisplayProps {
   imageUrl: string;
@@ -434,7 +434,7 @@ const ImageUpload: FC<ImageUploadProps> = memo(
     const uploadWithProgress = useFileStore((s) => s.uploadWithProgress);
     const [uploadState, setUploadState] = useState<UploadState | null>(null);
     const { t } = useTranslation('components');
-    const { message } = App.useApp();
+
     const { validateFiles, validateDimensions } = useUploadFilesValidation(
       undefined,
       maxFileSize,
@@ -539,7 +539,7 @@ const ImageUpload: FC<ImageUploadProps> = memo(
     const handleDrop = async (files: File[]) => {
       // Show warning if multiple files detected
       if (files.length > 1) {
-        message.warning(t('ImageUpload.actions.dropMultipleFiles'));
+        toast.warning(t('ImageUpload.actions.dropMultipleFiles'));
       }
 
       // Take the first image file

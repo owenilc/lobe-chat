@@ -4,13 +4,15 @@ import {
   sanitizeFolderName,
   topologicalSortFolders,
 } from '@lobechat/utils';
+import { toast, type ToastInstance } from '@lobehub/ui/base-ui';
 import { t } from 'i18next';
 import pMap from 'p-map';
 import { type SWRResponse } from 'swr';
 
-import { message } from '@/components/AntdStaticMethods';
 import { FILE_UPLOAD_BLACKLIST, MAX_UPLOAD_FILE_COUNT } from '@/const/file';
+import { isChunkingSupported } from '@/libs/document-loaders/loaderType';
 import { mutate, useClientDataSWR } from '@/libs/swr';
+import { fileKeys } from '@/libs/swr/keys';
 import { documentService } from '@/services/document';
 import { FileService, fileService } from '@/services/file';
 import { ragService } from '@/services/rag';
@@ -18,19 +20,22 @@ import { type UploadFileListDispatch } from '@/store/file/reducers/uploadFileLis
 import { uploadFileListReducer } from '@/store/file/reducers/uploadFileList';
 import { type StoreSetter } from '@/store/types';
 import { type FileListItem, type QueryFileListParams } from '@/types/files';
-import { isChunkingUnsupported } from '@/utils/isChunkingUnsupported';
+import { type ResourceItem } from '@/types/resource';
 import { unzipFile } from '@/utils/unzipFile';
 
 import { type FileStore } from '../../store';
 import { fileManagerSelectors } from './selectors';
 
 const serverFileService = new FileService();
-const FETCH_ALL_KNOWLEDGE_KEY = 'useFetchKnowledgeItems';
 
 export interface FolderCrumb {
   id: string;
   name: string;
   slug: string;
+}
+
+interface RefreshFileListOptions {
+  revalidateResources?: boolean;
 }
 
 type Setter = StoreSetter<FileStore>;
@@ -46,6 +51,78 @@ export class FileManageActionImpl {
     this.#set = set;
     this.#get = get;
   }
+
+  #resolveChunkTargetId = async (id: string): Promise<string> => {
+    // Reuse the selector so local resolution consults every store list
+    // (fileList → resourceMap → resourceMap-by-fileId → resourceList).
+    const localResource = fileManagerSelectors.getFileByChunkTargetId(id)(this.#get());
+    if (localResource?.fileId) return localResource.fileId;
+    if (!id.startsWith('docs_')) return id;
+
+    try {
+      const resource = await fileService.getKnowledgeItem(id);
+      return resource?.fileId ?? id;
+    } catch {
+      return id;
+    }
+  };
+
+  #resolveChunkTargetIds = async (ids: string[]): Promise<string[]> =>
+    Promise.all(ids.map((id) => this.#resolveChunkTargetId(id)));
+
+  #buildOptimisticUploadResource = (
+    file: File,
+    result: { id: string; url: string },
+    knowledgeBaseId?: string,
+    parentId?: string,
+    visibility?: 'private' | 'public',
+  ): ResourceItem => {
+    const existing = this.#get().resourceMap.get(result.id);
+
+    return {
+      ...(existing || {
+        createdAt: new Date(),
+        fileType: file.type || 'application/octet-stream',
+        name: file.name,
+        size: file.size,
+        sourceType: 'file' as const,
+      }),
+      _optimistic: undefined,
+      id: result.id,
+      knowledgeBaseId,
+      name: file.name,
+      parentId,
+      size: file.size,
+      updatedAt: new Date(),
+      url: result.url,
+      // Server persists the final visibility, but the row can be listed before
+      // the refetch lands. Carry the user's picker choice so the lock badge is
+      // consistent while the request is in flight.
+      ...(visibility !== undefined ? { visibility } : {}),
+    };
+  };
+
+  #insertOptimisticUpload = (
+    id: string,
+    file: File,
+    knowledgeBaseId?: string,
+    parentId?: string,
+    visibility?: 'private' | 'public',
+  ) => {
+    this.#get().insertLocalResource(
+      {
+        fileType: file.type || 'application/octet-stream',
+        knowledgeBaseId,
+        name: file.name,
+        parentId,
+        size: file.size,
+        sourceType: 'file',
+        url: '',
+        ...(visibility !== undefined ? { visibility } : {}),
+      },
+      id,
+    );
+  };
 
   cancelUpload = (id: string): void => {
     const { dockUploadFileList, dispatchDockFileList } = this.#get();
@@ -63,6 +140,74 @@ export class FileManageActionImpl {
     });
   };
 
+  cancelUploads = (ids: string[]): void => {
+    if (ids.length === 0) return;
+
+    const { dockUploadFileList, dispatchDockFileList } = this.#get();
+    const cancellableIds = new Set(ids);
+    const cancelledIds: string[] = [];
+
+    for (const uploadItem of dockUploadFileList) {
+      if (!cancellableIds.has(uploadItem.id)) continue;
+
+      uploadItem.abortController?.abort();
+      cancelledIds.push(uploadItem.id);
+    }
+
+    if (cancelledIds.length === 0) return;
+
+    dispatchDockFileList({
+      ids: cancelledIds,
+      status: 'cancelled',
+      type: 'updateFileStatuses',
+    });
+  };
+
+  retryDockUpload = async (id: string): Promise<void> => {
+    const { dispatchDockFileList, dockUploadFileList } = this.#get();
+    const item = dockUploadFileList.find((file) => file.id === id);
+    if (!item || item.status !== 'error' || item.errorCode) return;
+
+    const abortController = new AbortController();
+    dispatchDockFileList({
+      id,
+      type: 'updateFile',
+      value: {
+        abortController,
+        error: undefined,
+        errorCode: undefined,
+        status: 'pending',
+        uploadState: undefined,
+      },
+    });
+
+    try {
+      const result = await this.#get().uploadWithProgress({
+        abortController,
+        file: item.file,
+        knowledgeBaseId: item.knowledgeBaseId,
+        onStatusUpdate: dispatchDockFileList,
+        parentId: item.parentId,
+        uploadId: id,
+        visibility: item.visibility,
+      });
+
+      if (!result) return;
+      await this.#get().refreshFileList({ revalidateResources: true });
+
+      if (isChunkingSupported({ fileType: item.file.type, name: item.file.name })) {
+        await this.#get().parseFilesToChunks([result.id], { skipExist: false });
+      }
+    } catch (error) {
+      console.error(error);
+      dispatchDockFileList({
+        id,
+        type: 'updateFile',
+        value: { error: t('upload.uploadFailed', { ns: 'error' }), status: 'error' },
+      });
+    }
+  };
+
   dispatchDockFileList = (payload: UploadFileListDispatch): void => {
     const nextValue = uploadFileListReducer(this.#get().dockUploadFileList, payload);
     if (nextValue === this.#get().dockUploadFileList) return;
@@ -71,11 +216,12 @@ export class FileManageActionImpl {
   };
 
   embeddingChunks = async (fileIds: string[]): Promise<void> => {
+    const chunkTargetIds = await this.#resolveChunkTargetIds(fileIds);
     // toggle file ids
-    this.#get().toggleEmbeddingIds(fileIds);
+    this.#get().toggleEmbeddingIds(chunkTargetIds);
 
     // parse files
-    const pools = fileIds.map(async (id) => {
+    const pools = chunkTargetIds.map(async (id) => {
       try {
         await ragService.createEmbeddingChunksTask(id);
       } catch (e) {
@@ -85,7 +231,7 @@ export class FileManageActionImpl {
 
     await Promise.all(pools);
     await this.#get().refreshFileList();
-    this.#get().toggleEmbeddingIds(fileIds, false);
+    this.#get().toggleEmbeddingIds(chunkTargetIds, false);
   };
 
   loadMoreKnowledgeItems = async (): Promise<void> => {
@@ -97,6 +243,7 @@ export class FileManageActionImpl {
     try {
       const response = await serverFileService.getKnowledgeItems({
         ...queryListParams,
+        includeContentPreview: queryListParams.includeContentPreview ?? false,
         limit: queryListParams.limit ?? 50,
         offset: fileListOffset,
       });
@@ -114,7 +261,7 @@ export class FileManageActionImpl {
       });
 
       // Update SWR cache so the component sees the new items
-      await mutate([FETCH_ALL_KNOWLEDGE_KEY, queryListParams], updatedFileList, {
+      await mutate(fileKeys.knowledgeItems(queryListParams), updatedFileList, {
         revalidate: false,
       });
     } catch (error) {
@@ -125,7 +272,7 @@ export class FileManageActionImpl {
   moveFileToFolder = async (fileId: string, parentId: string | null): Promise<void> => {
     // Optimistically update all file list caches
     await mutate(
-      (key) => Array.isArray(key) && key[0] === FETCH_ALL_KNOWLEDGE_KEY,
+      (key) => Array.isArray(key) && key[0] === fileKeys.knowledgeItems.root,
       async (currentData: FileListItem[] | undefined) => {
         if (!currentData) return currentData;
         // Update the moved file's parentId in the cache
@@ -144,11 +291,12 @@ export class FileManageActionImpl {
   };
 
   parseFilesToChunks = async (ids: string[], params?: { skipExist?: boolean }): Promise<void> => {
+    const chunkTargetIds = await this.#resolveChunkTargetIds(ids);
     // toggle file ids
-    this.#get().toggleParsingIds(ids);
+    this.#get().toggleParsingIds(chunkTargetIds);
 
     // parse files
-    const pools = ids.map(async (id) => {
+    const pools = chunkTargetIds.map(async (id) => {
       try {
         await ragService.createParseFileTask(id, params?.skipExist);
       } catch (e) {
@@ -158,15 +306,17 @@ export class FileManageActionImpl {
 
     await Promise.all(pools);
     await this.#get().refreshFileList();
-    this.#get().toggleParsingIds(ids, false);
+    this.#get().toggleParsingIds(chunkTargetIds, false);
   };
 
   pushDockFileList = async (
     rawFiles: File[],
     knowledgeBaseId?: string,
     parentId?: string,
+    visibility?: 'private' | 'public',
   ): Promise<void> => {
     const { dispatchDockFileList } = this.#get();
+    const generateUploadId = createNanoId(12);
 
     // 0. Process ZIP files and extract their contents
     const filesToUpload: File[] = [];
@@ -194,10 +344,23 @@ export class FileManageActionImpl {
       return {
         abortController,
         file,
-        id: file.name,
+        id: `upload_${generateUploadId()}`,
+        knowledgeBaseId,
+        parentId,
         status: 'pending' as const,
+        visibility,
       };
     });
+
+    for (const uploadFile of uploadFiles) {
+      this.#insertOptimisticUpload(
+        uploadFile.id,
+        uploadFile.file,
+        knowledgeBaseId,
+        parentId,
+        visibility,
+      );
+    }
 
     // 3. Add all files to dock
     dispatchDockFileList({
@@ -216,10 +379,24 @@ export class FileManageActionImpl {
           knowledgeBaseId,
           onStatusUpdate: dispatchDockFileList,
           parentId,
+          uploadId: uploadFileItem.id,
+          visibility,
         });
 
-        // Note: Don't refresh after each file to avoid flickering
-        // We'll refresh once at the end
+        if (!result) {
+          this.#get().removeLocalResource(uploadFileItem.id);
+        } else {
+          this.#get().replaceLocalResource(
+            uploadFileItem.id,
+            this.#buildOptimisticUploadResource(
+              uploadFileItem.file,
+              result,
+              knowledgeBaseId,
+              parentId,
+              visibility,
+            ),
+          );
+        }
 
         return {
           file: uploadFileItem.file,
@@ -228,14 +405,20 @@ export class FileManageActionImpl {
         };
       },
       { concurrency: MAX_UPLOAD_FILE_COUNT },
-    );
+    ).catch((error) => {
+      for (const uploadFile of uploadFiles) {
+        this.#get().removeLocalResource(uploadFile.id);
+      }
 
-    // Refresh file list to show newly uploaded files
-    await this.#get().refreshFileList();
+      throw error;
+    });
 
     // 5. auto-embed files that support chunking
     const fileIdsToEmbed = uploadResults
-      .filter(({ fileType, fileId }) => fileId && !isChunkingUnsupported(fileType))
+      .filter(
+        ({ file, fileId }) =>
+          fileId && isChunkingSupported({ fileType: file.type, name: file.name }),
+      )
       .map(({ fileId }) => fileId!);
 
     if (fileIdsToEmbed.length > 0) {
@@ -244,54 +427,66 @@ export class FileManageActionImpl {
   };
 
   reEmbeddingChunks = async (id: string): Promise<void> => {
-    if (fileManagerSelectors.isCreatingChunkEmbeddingTask(id)(this.#get())) return;
+    const chunkTargetId = await this.#resolveChunkTargetId(id);
+    if (fileManagerSelectors.isCreatingChunkEmbeddingTask(chunkTargetId)(this.#get())) return;
 
     // toggle file ids
-    this.#get().toggleEmbeddingIds([id]);
+    this.#get().toggleEmbeddingIds([chunkTargetId]);
 
-    await serverFileService.removeFileAsyncTask(id, 'embedding');
-
-    await this.#get().refreshFileList();
-
-    await ragService.createEmbeddingChunksTask(id);
+    await serverFileService.removeFileAsyncTask(chunkTargetId, 'embedding');
 
     await this.#get().refreshFileList();
 
-    this.#get().toggleEmbeddingIds([id], false);
+    await ragService.createEmbeddingChunksTask(chunkTargetId);
+
+    await this.#get().refreshFileList();
+
+    this.#get().toggleEmbeddingIds([chunkTargetId], false);
   };
 
   reParseFile = async (id: string): Promise<void> => {
+    const chunkTargetId = await this.#resolveChunkTargetId(id);
     // toggle file ids
-    this.#get().toggleParsingIds([id]);
+    this.#get().toggleParsingIds([chunkTargetId]);
 
-    await ragService.retryParseFile(id);
+    await ragService.retryParseFile(chunkTargetId);
 
     await this.#get().refreshFileList();
 
-    this.#get().toggleParsingIds([id], false);
+    this.#get().toggleParsingIds([chunkTargetId], false);
   };
 
-  refreshFileList = async (): Promise<void> => {
-    // Invalidate all queries that start with FETCH_ALL_KNOWLEDGE_KEY
+  #refreshKnowledgeListCaches = async (): Promise<void> => {
+    // Invalidate all queries under the file:knowledgeItems namespace
     // This ensures all file lists (explorer, tree, etc.) are refreshed
     // Note: We don't pass data as undefined to avoid clearing the cache,
     // which would cause isLoading to become true and show skeleton screen
     await mutate(
-      (key) => Array.isArray(key) && key[0] === FETCH_ALL_KNOWLEDGE_KEY,
+      (key) => Array.isArray(key) && key[0] === fileKeys.knowledgeItems.root,
       async (currentData) => currentData,
       {
         revalidate: true,
       },
     );
+  };
 
-    // Also revalidate the ResourceManager resource list cache (SWR_RESOURCES)
-    // so uploaded files appear immediately in the Explorer without a full refresh.
+  refreshFileList = async (options?: RefreshFileListOptions): Promise<void> => {
+    await this.#refreshKnowledgeListCaches();
+
+    if (options?.revalidateResources === false) return;
+
     const { revalidateResources } = await import('../resource/hooks');
     await revalidateResources();
   };
 
-  removeAllFiles = async (): Promise<void> => {
-    await fileService.removeAllFiles();
+  publishFileToWorkspace = async (id: string): Promise<void> => {
+    await fileService.publishFileToWorkspace(id);
+    await this.#get().refreshFileList();
+  };
+
+  setFileVisibility = async (id: string, visibility: 'private' | 'public'): Promise<void> => {
+    await fileService.setFileVisibility(id, visibility);
+    await this.#get().refreshFileList();
   };
 
   removeFileItem = async (id: string): Promise<void> => {
@@ -307,7 +502,7 @@ export class FileManageActionImpl {
   renameFolder = async (folderId: string, newName: string): Promise<void> => {
     // Optimistically update all file list caches
     await mutate(
-      (key) => Array.isArray(key) && key[0] === FETCH_ALL_KNOWLEDGE_KEY,
+      (key) => Array.isArray(key) && key[0] === fileKeys.knowledgeItems.root,
       async (currentData: FileListItem[] | undefined) => {
         if (!currentData) return currentData;
         // Update the folder's name in the cache
@@ -321,7 +516,6 @@ export class FileManageActionImpl {
     );
 
     // Perform the actual update
-    const { documentService } = await import('@/services/document');
     await documentService.updateDocument({ id: folderId, title: newName });
 
     // Revalidate to get fresh data from server
@@ -334,10 +528,6 @@ export class FileManageActionImpl {
 
   setPendingRenameItemId = (id: string | null): void => {
     this.#set({ pendingRenameItemId: id }, false, 'setPendingRenameItemId');
-  };
-
-  setUploadDockExpanded = (expanded: boolean): void => {
-    this.#set({ uploadDockExpanded: expanded }, false, 'setUploadDockExpanded');
   };
 
   toggleEmbeddingIds = (ids: string[], loading?: boolean): void => {
@@ -382,6 +572,7 @@ export class FileManageActionImpl {
     currentFolderId?: string,
   ): Promise<void> => {
     const { dispatchDockFileList } = this.#get();
+    const generateUploadId = createNanoId(12);
 
     // 1. Build folder tree from file paths
     const { filesByFolder, folders } = buildFolderTree(files);
@@ -390,12 +581,11 @@ export class FileManageActionImpl {
     const sortedFolderPaths = topologicalSortFolders(folders);
 
     // Show toast notification if there are folders to create
-    const messageKey = 'uploadFolder.creatingFolders';
+    let creatingFoldersToast: ToastInstance | undefined;
     if (sortedFolderPaths.length > 0) {
-      message.loading({
-        content: t('header.actions.uploadFolder.creatingFolders', { ns: 'file' }),
-        duration: 0, // Don't auto-dismiss
-        key: messageKey,
+      creatingFoldersToast = toast.loading({
+        duration: Infinity, // Don't auto-dismiss
+        title: t('header.actions.uploadFolder.creatingFolders', { ns: 'file' }),
       });
     }
 
@@ -450,9 +640,7 @@ export class FileManageActionImpl {
       }
 
       // Dismiss the toast after folders are created
-      if (sortedFolderPaths.length > 0) {
-        message.destroy(messageKey);
-      }
+      creatingFoldersToast?.close();
 
       // Refresh file list to show the new folders
       await this.#get().refreshFileList();
@@ -477,38 +665,81 @@ export class FileManageActionImpl {
         ({ file }) => !FILE_UPLOAD_BLACKLIST.includes(file.name),
       );
 
+      const uploadItems = validUploads.map(({ file, parentId }) => ({
+        abortController: new AbortController(),
+        file,
+        id: `upload_${generateUploadId()}`,
+        parentId,
+        shouldShowInCurrentList: (parentId ?? undefined) === currentFolderId,
+      }));
+
       // 7. Add all files to dock
       dispatchDockFileList({
         atStart: true,
-        files: validUploads.map(({ file }) => ({ file, id: file.name, status: 'pending' })),
+        files: uploadItems.map(({ abortController, file, id, parentId }) => ({
+          abortController,
+          file,
+          id,
+          knowledgeBaseId,
+          parentId,
+          status: 'pending' as const,
+        })),
         type: 'addFiles',
       });
 
+      for (const uploadItem of uploadItems) {
+        if (!uploadItem.shouldShowInCurrentList) continue;
+
+        this.#insertOptimisticUpload(
+          uploadItem.id,
+          uploadItem.file,
+          knowledgeBaseId,
+          uploadItem.parentId,
+        );
+      }
+
       // 8. Upload files with concurrency limit
       const uploadResults = await pMap(
-        validUploads,
-        async ({ file, parentId }) => {
+        uploadItems,
+        async ({ abortController, file, id, parentId, shouldShowInCurrentList }) => {
           const result = await this.#get().uploadWithProgress({
+            abortController,
             file,
             knowledgeBaseId,
             onStatusUpdate: dispatchDockFileList,
             parentId,
+            uploadId: id,
           });
 
-          // Note: Don't refresh after each file to avoid flickering
-          // We'll refresh once at the end
+          if (shouldShowInCurrentList) {
+            if (!result) {
+              this.#get().removeLocalResource(id);
+            } else {
+              this.#get().replaceLocalResource(
+                id,
+                this.#buildOptimisticUploadResource(file, result, knowledgeBaseId, parentId),
+              );
+            }
+          }
 
           return { file, fileId: result?.id, fileType: file.type };
         },
         { concurrency: MAX_UPLOAD_FILE_COUNT },
-      );
+      ).catch((error) => {
+        for (const uploadItem of uploadItems) {
+          if (!uploadItem.shouldShowInCurrentList) continue;
+          this.#get().removeLocalResource(uploadItem.id);
+        }
 
-      // Refresh the file list once after all uploads are complete
-      await this.#get().refreshFileList();
+        throw error;
+      });
 
       // 9. Auto-embed files that support chunking
       const fileIdsToEmbed = uploadResults
-        .filter(({ fileType, fileId }) => fileId && !isChunkingUnsupported(fileType))
+        .filter(
+          ({ file, fileId }) =>
+            fileId && isChunkingSupported({ fileType: file.type, name: file.name }),
+        )
         .map(({ fileId }) => fileId!);
 
       if (fileIdsToEmbed.length > 0) {
@@ -516,9 +747,7 @@ export class FileManageActionImpl {
       }
     } catch (error) {
       // Dismiss toast on error
-      if (sortedFolderPaths.length > 0) {
-        message.destroy(messageKey);
-      }
+      creatingFoldersToast?.close();
       throw error;
     }
   };
@@ -544,9 +773,10 @@ export class FileManageActionImpl {
   };
 
   useFetchKnowledgeItems = (params: QueryFileListParams): SWRResponse<FileListItem[]> => {
-    return useClientDataSWR<FileListItem[]>([FETCH_ALL_KNOWLEDGE_KEY, params], async () => {
+    return useClientDataSWR<FileListItem[]>(fileKeys.knowledgeItems(params), async () => {
       const response = await serverFileService.getKnowledgeItems({
         ...params,
+        includeContentPreview: params.includeContentPreview ?? false,
         limit: params.limit ?? 50,
         offset: 0,
       });

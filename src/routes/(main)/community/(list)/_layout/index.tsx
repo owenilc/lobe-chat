@@ -1,7 +1,8 @@
 import { Flexbox } from '@lobehub/ui';
-import { Outlet } from 'react-router-dom';
+import { Outlet } from 'react-router';
 
 import WideScreenContainer from '@/features/WideScreenContainer';
+import { RouteSkeletonChromeProvider } from '@/spa/router/routeSkeletonChrome';
 
 import { MAX_WIDTH } from '../../features/const';
 import Footer from './Footer';
@@ -17,13 +18,17 @@ const Layout = () => {
           className={styles.contentContainer}
           gap={16}
           minWidth={MAX_WIDTH}
-          paddingBlock={16}
+          style={{ paddingBottom: 56, paddingTop: 16 }}
           wrapperStyle={{
             minHeight: '100%',
             position: 'relative',
           }}
         >
-          <Outlet />
+          <Flexbox gap={16} style={{ paddingBlockEnd: 40 }} width={'100%'}>
+            <RouteSkeletonChromeProvider>
+              <Outlet />
+            </RouteSkeletonChromeProvider>
+          </Flexbox>
           <div className={styles.spacer} />
           <Footer />
         </WideScreenContainer>

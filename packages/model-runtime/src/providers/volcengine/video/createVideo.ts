@@ -1,7 +1,7 @@
 import createDebug from 'debug';
 
 import type { CreateVideoOptions } from '../../../core/openaiCompatibleFactory';
-import type { CreateVideoPayload, CreateVideoResponse } from '../../../types/video';
+import type { CreateVideoPayload, CreateVideoResult } from '../../../types/video';
 
 const log = createDebug('lobe-video:volcengine');
 
@@ -12,15 +12,18 @@ const log = createDebug('lobe-video:volcengine');
 export async function createVolcengineVideo(
   payload: CreateVideoPayload,
   options: CreateVideoOptions,
-): Promise<CreateVideoResponse> {
+): Promise<CreateVideoResult> {
   const { model, params } = payload;
   const {
     prompt,
     imageUrl,
+    imageUrls,
     endImageUrl,
     aspectRatio,
     duration,
     generateAudio,
+    webSearch,
+    watermark,
     seed,
     resolution,
     cameraFixed,
@@ -37,6 +40,16 @@ export async function createVolcengineVideo(
     content.push({ image_url: { url: imageUrl }, role: 'first_frame', type: 'image_url' });
   }
 
+  if (imageUrls && imageUrls.length > 0) {
+    if (imageUrls.length === 1 && endImageUrl) {
+      content.push({ image_url: { url: imageUrls[0] }, role: 'first_frame', type: 'image_url' });
+    } else {
+      imageUrls.forEach((url) =>
+        content.push({ image_url: { url }, role: 'reference_image', type: 'image_url' }),
+      );
+    }
+  }
+
   if (endImageUrl) {
     content.push({ image_url: { url: endImageUrl }, role: 'last_frame', type: 'image_url' });
   }
@@ -45,7 +58,8 @@ export async function createVolcengineVideo(
   const body: Record<string, unknown> = {
     content,
     model,
-    watermark: false,
+    watermark: watermark ?? false,
+    ...(webSearch && { tools: [{ type: 'web_search' }] }),
   };
 
   if (aspectRatio !== undefined) body.ratio = aspectRatio;

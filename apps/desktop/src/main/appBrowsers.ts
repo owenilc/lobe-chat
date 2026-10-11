@@ -5,6 +5,7 @@ import type { BrowserWindowOpts } from './core/browser/Browser';
 export const BrowsersIdentifiers = {
   app: 'app',
   devtools: 'devtools',
+  processExplorer: 'processExplorer',
 };
 
 export const appBrowsers = {
@@ -31,6 +32,16 @@ export const appBrowsers = {
     path: '/desktop/devtools',
     titleBarStyle: 'hiddenInset',
     width: 1000,
+  },
+  processExplorer: {
+    autoHideMenuBar: true,
+    height: 560,
+    identifier: 'processExplorer',
+    minHeight: 320,
+    minWidth: 560,
+    path: '/popup/processes',
+    titleBarStyle: 'hidden',
+    width: 840,
   },
 } satisfies Record<string, BrowserWindowOpts>;
 
@@ -62,6 +73,20 @@ export const windowTemplates = {
     height: 600,
     keepAlive: false, // Multi-instance windows don't need to stay alive
     minWidth: 400,
+    parentIdentifier: 'app',
+    titleBarStyle: 'hidden',
+    width: 900,
+  },
+  // Dedicated single-topic popup window. Loads the popup.html SPA entry
+  // (no sidebar / portal), one window per (scope, id) pair.
+  topicPopup: {
+    allowMultipleInstances: true,
+    autoHideMenuBar: true,
+    baseIdentifier: 'topicPopup',
+    basePath: '/popup',
+    height: 720,
+    keepAlive: false,
+    minWidth: 480,
     parentIdentifier: 'app',
     titleBarStyle: 'hidden',
     width: 900,

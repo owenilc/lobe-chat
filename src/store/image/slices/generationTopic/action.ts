@@ -1,13 +1,14 @@
 import { chainSummaryGenerationTitle } from '@lobechat/prompts';
+import { RequestTrigger } from '@lobechat/types';
 import isEqual from 'fast-deep-equal';
 import { type SWRResponse } from 'swr';
 
 import { LOADING_FLAT } from '@/const/message';
 import { mutate, useClientDataSWR } from '@/libs/swr';
+import { imageKeys } from '@/libs/swr/keys';
 import { type UpdateTopicValue } from '@/server/routers/lambda/generationTopic';
 import { chatService } from '@/services/chat';
 import { generationTopicService } from '@/services/generationTopic';
-import { globalHelpers } from '@/store/global/helpers';
 import { type StoreSetter } from '@/store/types';
 import { useUserStore } from '@/store/user';
 import { systemAgentSelectors, userGeneralSettingsSelectors } from '@/store/user/selectors';
@@ -16,11 +17,10 @@ import { merge } from '@/utils/merge';
 import { setNamespace } from '@/utils/storeDebug';
 
 import { type ImageStore } from '../../store';
+import { type GenerationTopicVisibility } from './initialState';
 import { type GenerationTopicDispatch } from './reducer';
 import { generationTopicReducer } from './reducer';
 import { generationTopicSelectors } from './selectors';
-
-const FETCH_GENERATION_TOPICS_KEY = 'fetchGenerationTopics';
 
 const n = setNamespace('generationTopic');
 
@@ -108,8 +108,7 @@ export class GenerationTopicActionImpl {
         chainSummaryGenerationTitle(
           prompts,
           'image',
-          userGeneralSettingsSelectors.responseLanguage(useUserStore.getState()) ||
-            globalHelpers.getCurrentLanguage(),
+          userGeneralSettingsSelectors.currentResponseLanguage(useUserStore.getState()),
         ),
       ),
       onError: async () => {
@@ -132,6 +131,7 @@ export class GenerationTopicActionImpl {
           }
         }
       },
+      trigger: RequestTrigger.GenerationTopicTitle,
     });
 
     return output;
@@ -139,17 +139,21 @@ export class GenerationTopicActionImpl {
 
   internal_createGenerationTopic = async (): Promise<string> => {
     const tmpId = Date.now().toString();
+    const { newGenerationTopicVisibility } = this.#get();
 
     // 1. Optimistic update - add temporary topic
     this.#get().internal_dispatchGenerationTopic(
-      { type: 'addTopic', value: { id: tmpId, title: '' } },
+      {
+        type: 'addTopic',
+        value: { id: tmpId, title: '', visibility: newGenerationTopicVisibility },
+      },
       'internal_createGenerationTopic',
     );
 
     this.#get().internal_updateGenerationTopicLoading(tmpId, true);
 
     // 2. Call backend service
-    const topicId = await generationTopicService.createTopic('image');
+    const topicId = await generationTopicService.createTopic('image', newGenerationTopicVisibility);
     this.#get().internal_updateGenerationTopicLoading(tmpId, false);
 
     // 3. Refresh data to ensure consistency
@@ -158,6 +162,33 @@ export class GenerationTopicActionImpl {
     this.#get().internal_updateGenerationTopicLoading(topicId, false);
 
     return topicId;
+  };
+
+  setNewGenerationTopicVisibility = (visibility: GenerationTopicVisibility): void => {
+    this.#set(
+      { newGenerationTopicVisibility: visibility },
+      false,
+      n('setNewGenerationTopicVisibility'),
+    );
+  };
+
+  /**
+   * Flip a generation topic's workspace visibility. Calls the backend and
+   * refreshes the topic list so the row hops between the "Private" and
+   * "Workspace" buckets (or disappears for non-creators on private).
+   */
+  setGenerationTopicVisibility = async (
+    id: string,
+    visibility: 'private' | 'public',
+  ): Promise<void> => {
+    this.#get().internal_updateGenerationTopicLoading(id, true);
+
+    try {
+      await generationTopicService.setTopicVisibility(id, visibility);
+      await this.#get().refreshGenerationTopics();
+    } finally {
+      this.#get().internal_updateGenerationTopicLoading(id, false);
+    }
   };
 
   internal_updateGenerationTopic = async (id: string, data: UpdateTopicValue): Promise<void> => {
@@ -211,10 +242,9 @@ export class GenerationTopicActionImpl {
 
   useFetchGenerationTopics = (enabled: boolean): SWRResponse<ImageGenerationTopic[]> => {
     return useClientDataSWR<ImageGenerationTopic[]>(
-      enabled ? [FETCH_GENERATION_TOPICS_KEY] : null,
+      enabled ? imageKeys.generationTopics() : null,
       () => generationTopicService.getAllGenerationTopics('image'),
       {
-        suspense: true,
         onSuccess: (data) => {
           // No need to update if data is the same
           if (isEqual(data, this.#get().generationTopics)) return;
@@ -225,7 +255,7 @@ export class GenerationTopicActionImpl {
   };
 
   refreshGenerationTopics = async (): Promise<void> => {
-    await mutate([FETCH_GENERATION_TOPICS_KEY]);
+    await mutate(imageKeys.generationTopics());
   };
 
   removeGenerationTopic = async (id: string): Promise<void> => {

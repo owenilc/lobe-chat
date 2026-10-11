@@ -1,7 +1,11 @@
+import { getJinaReaderBaseUrl } from '@lobechat/utils';
+
 import type { CrawlImpl } from '../type';
 import { toFetchError } from '../utils/errorType';
-import { parseJSONResponse } from '../utils/response';
-import { DEFAULT_TIMEOUT, withTimeout } from '../utils/withTimeout';
+import { createHTTPStatusError, parseJSONResponse } from '../utils/response';
+import { withTimeout } from '../utils/withTimeout';
+
+const JINA_TIMEOUT = 15_000;
 
 export const jina: CrawlImpl<{ apiKey?: string }> = async (url, params) => {
   const token = params.apiKey ?? process.env.JINA_READER_API_KEY ?? process.env.JINA_API_KEY;
@@ -10,7 +14,7 @@ export const jina: CrawlImpl<{ apiKey?: string }> = async (url, params) => {
   try {
     res = await withTimeout(
       (signal) =>
-        fetch(`https://r.jina.ai/${url}`, {
+        fetch(`${getJinaReaderBaseUrl()}/${url}`, {
           headers: {
             'Accept': 'application/json',
             'Authorization': token ? `Bearer ${token}` : '',
@@ -18,14 +22,14 @@ export const jina: CrawlImpl<{ apiKey?: string }> = async (url, params) => {
           },
           signal,
         }),
-      DEFAULT_TIMEOUT,
+      JINA_TIMEOUT,
     );
   } catch (e) {
     throw toFetchError(e);
   }
 
   if (!res.ok) {
-    return;
+    throw await createHTTPStatusError(res, 'Jina');
   }
 
   const json = await parseJSONResponse<{
@@ -36,10 +40,15 @@ export const jina: CrawlImpl<{ apiKey?: string }> = async (url, params) => {
       siteName?: string;
       title?: string;
     };
+    message?: string;
   }>(res, 'Jina');
 
   if (json.code !== 200) {
-    return;
+    throw new Error(
+      json.message
+        ? `Jina request failed with code ${json.code}: ${json.message}`
+        : `Jina request failed with code ${json.code}`,
+    );
   }
 
   const result = json.data;

@@ -1,7 +1,7 @@
 'use client';
 
-import { ActionIcon, Block } from '@lobehub/ui';
-import { Spin } from 'antd';
+import { Block } from '@lobehub/ui';
+import { ActionIcon, Spin } from '@lobehub/ui/base-ui';
 import { createStaticStyles, cssVar, cx } from 'antd-style';
 import { Plus, X } from 'lucide-react';
 import type { ChangeEvent, CSSProperties } from 'react';
@@ -118,6 +118,12 @@ export const uploadCardStyles = createStaticStyles(({ css }) => ({
     border-radius: 3px;
 
     background: ${cssVar.colorBgMask};
+
+    /* The mask is a dark scrim in both themes, so the spinner needs a fixed
+       white rather than a theme-following token. */
+    svg {
+      color: ${cssVar.colorWhite};
+    }
   `,
 }));
 
@@ -126,9 +132,19 @@ interface UploadCardProps {
   closeClassName?: string;
   imageUrl?: string | null;
   label?: string;
+  /** Show an upload spinner overlay (for externally-managed batch uploads). */
+  loading?: boolean;
   maxFileSize?: number;
+  /** Allow selecting multiple files at once (requires `onUploadFiles`). */
+  multiple?: boolean;
   onRemove: () => void;
   onUpload: (data: UploadData) => void;
+  /**
+   * Batch upload handler. When provided, file selection is delegated to the
+   * parent (which uploads + lands all files together) instead of the card's
+   * internal single-file upload, enabling multi-select.
+   */
+  onUploadFiles?: (files: File[]) => void | Promise<void>;
   style?: CSSProperties;
   variant?: 'card' | 'circle';
 }
@@ -137,9 +153,12 @@ const UploadCard = memo<UploadCardProps>(
   ({
     imageUrl,
     label,
+    loading = false,
     onUpload,
+    onUploadFiles,
     onRemove,
     maxFileSize,
+    multiple = false,
     className,
     closeClassName,
     style,
@@ -150,12 +169,25 @@ const UploadCard = memo<UploadCardProps>(
     const [isUploading, setIsUploading] = useState(false);
     const [uploadPreview, setUploadPreview] = useState<string | null>(null);
 
+    // Combine internal single-upload spinner with externally-driven batch loading.
+    const uploading = isUploading || loading;
+
     const handleFileSelect = useCallback(() => {
+      if (loading) return;
       inputRef.current?.click();
-    }, []);
+    }, [loading]);
 
     const handleFileChange = useCallback(
       async (e: ChangeEvent<HTMLInputElement>) => {
+        // When a batch handler is provided, delegate all selected files to the
+        // parent so multiple references can be uploaded and landed at once.
+        if (onUploadFiles) {
+          const files = Array.from(e.target.files ?? []);
+          if (files.length === 0) return;
+          await onUploadFiles(files);
+          return;
+        }
+
         const file = e.target.files?.[0];
         if (!file) return;
 
@@ -184,7 +216,7 @@ const UploadCard = memo<UploadCardProps>(
           setIsUploading(false);
         }
       },
-      [maxFileSize, uploadWithProgress, onUpload],
+      [maxFileSize, uploadWithProgress, onUpload, onUploadFiles],
     );
 
     const showPreview = uploadPreview || imageUrl;
@@ -192,6 +224,7 @@ const UploadCard = memo<UploadCardProps>(
     const fileInput = (
       <input
         accept="image/*"
+        multiple={multiple}
         ref={inputRef}
         style={{ display: 'none' }}
         type="file"
@@ -236,13 +269,13 @@ const UploadCard = memo<UploadCardProps>(
                 src={uploadPreview || imageUrl!}
                 style={{ objectFit: 'cover' }}
               />
-              {isUploading && (
+              {uploading && (
                 <div className={uploadCardStyles.uploadOverlay}>
-                  <Spin percent={'auto'} size="small" />
+                  <Spin size="small" />
                 </div>
               )}
             </div>
-            {!isUploading && (
+            {!uploading && (
               <ActionIcon
                 glass
                 className={cx(uploadCardStyles.closeButton, closeClassName, 'upload-card-close')}

@@ -1,7 +1,7 @@
-import { type UIChatMessage } from '@lobechat/types';
-import { type FormItemProps } from '@lobehub/ui';
-import { Button, Flexbox, Form, Segmented } from '@lobehub/ui';
-import { Switch } from 'antd';
+import { agentDisplayName, type UIChatMessage } from '@lobechat/types';
+import { Flexbox } from '@lobehub/ui';
+import { Button, Switch, Tabs } from '@lobehub/ui/base-ui';
+import { Form, type FormFieldProps, useForm } from '@lobehub/ui/base-ui/form';
 import { CopyIcon } from 'lucide-react';
 import { memo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -13,21 +13,36 @@ import { ImageType, imageTypeOptions, useScreenshot } from '@/hooks/useScreensho
 import { useAgentStore } from '@/store/agent';
 import { agentSelectors } from '@/store/agent/selectors';
 
+import { contextSelectors, useConversationStore } from '../../../store';
 import { styles } from '../style';
 import Preview from './Preview';
-import { type FieldType } from './type';
+import { type FieldType, WidthMode } from './type';
 
 const DEFAULT_FIELD_VALUE: FieldType = {
   imageType: ImageType.JPG,
-  withBackground: true,
+  widthMode: WidthMode.Wide,
+  withBackground: false,
   withFooter: true,
 };
 
 const ShareImage = memo<{ message: UIChatMessage; mobile?: boolean; uniqueId?: string }>(
   ({ message, uniqueId }) => {
-    const currentAgentTitle = useAgentStore(agentSelectors.currentAgentTitle);
+    const agentId = useConversationStore(contextSelectors.agentId);
+    const currentAgentTitle = useAgentStore((s) =>
+      agentDisplayName(agentSelectors.getAgentMetaById(agentId)(s)),
+    );
+    const context = useConversationStore((s) => s.context);
     const [fieldValue, setFieldValue] = useState<FieldType>(DEFAULT_FIELD_VALUE);
+    const form = useForm({
+      initialValues: DEFAULT_FIELD_VALUE,
+      onValuesChange: (_, v) => setFieldValue(v),
+    });
     const { t } = useTranslation(['chat', 'common']);
+
+    const widthModeOptions = [
+      { key: WidthMode.Wide, label: t('shareModal.widthMode.wide') },
+      { key: WidthMode.Narrow, label: t('shareModal.widthMode.narrow') },
+    ];
 
     // Generate a unique preview ID to avoid DOM conflicts
     const previewId = uniqueId ? `preview-${uniqueId}` : 'preview';
@@ -38,14 +53,21 @@ const ShareImage = memo<{ message: UIChatMessage; mobile?: boolean; uniqueId?: s
       title: currentAgentTitle ?? undefined,
     });
     const { loading: copyLoading, onCopy } = useImgToClipboard({ id: `#${previewId}` });
-    const settings: FormItemProps[] = [
+    const settings: FormFieldProps<FieldType>[] = [
+      {
+        children: <Tabs items={widthModeOptions} />,
+        label: t('shareModal.widthMode.label'),
+        layout: 'horizontal',
+        minWidth: undefined,
+        name: 'widthMode',
+        valueProp: 'activeKey',
+      },
       {
         children: <Switch />,
         label: t('shareModal.withBackground'),
         layout: 'horizontal',
         minWidth: undefined,
         name: 'withBackground',
-        valuePropName: 'checked',
       },
       {
         children: <Switch />,
@@ -53,14 +75,14 @@ const ShareImage = memo<{ message: UIChatMessage; mobile?: boolean; uniqueId?: s
         layout: 'horizontal',
         minWidth: undefined,
         name: 'withFooter',
-        valuePropName: 'checked',
       },
       {
-        children: <Segmented options={imageTypeOptions} />,
+        children: <Tabs items={imageTypeOptions} />,
         label: t('shareModal.imageType'),
-        layout: 'horizontal',
+        layout: 'vertical',
         minWidth: undefined,
         name: 'imageType',
+        valueProp: 'activeKey',
       },
     ];
 
@@ -87,15 +109,15 @@ const ShareImage = memo<{ message: UIChatMessage; mobile?: boolean; uniqueId?: s
     return (
       <>
         <Flexbox className={styles.body} gap={16} horizontal={!isMobile}>
-          <Preview title={title} {...fieldValue} message={message} previewId={previewId} />
+          <Preview
+            context={context}
+            title={title}
+            {...fieldValue}
+            message={message}
+            previewId={previewId}
+          />
           <Flexbox className={styles.sidebar} gap={12}>
-            <Form
-              initialValues={DEFAULT_FIELD_VALUE}
-              items={settings}
-              itemsType={'flat'}
-              onValuesChange={(_, v) => setFieldValue(v)}
-              {...FORM_STYLE}
-            />
+            <Form form={form} items={settings} itemsType={'flat'} {...FORM_STYLE} />
             {!isMobile && button}
           </Flexbox>
         </Flexbox>

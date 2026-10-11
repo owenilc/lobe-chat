@@ -1,12 +1,11 @@
 'use client';
 
 import { Icon } from '@lobehub/ui';
-import { createStyles } from 'antd-style';
+import { createStaticStyles, cssVar, cx } from 'antd-style';
 import { Brain, ChartBar, Clock, MessageSquare } from 'lucide-react';
 import { memo } from 'react';
-import { useTranslation } from 'react-i18next';
 
-const useStyles = createStyles(({ css, token }) => ({
+const styles = createStaticStyles(({ css }) => ({
   center: css`
     position: absolute;
     inset: 0;
@@ -18,11 +17,11 @@ const useStyles = createStyles(({ css, token }) => ({
     width: 40px;
     height: 40px;
     margin: auto;
-    border-radius: 50%;
+    border-radius: 999px;
 
-    color: ${token.colorWarning};
+    color: ${cssVar.colorWarning};
 
-    background: ${token.colorWarningBg};
+    background: ${cssVar.colorWarningBg};
   `,
   container: css`
     position: relative;
@@ -36,8 +35,8 @@ const useStyles = createStyles(({ css, token }) => ({
   `,
   hint: css`
     margin-block-start: 24px;
-    font-size: 13px;
-    color: ${token.colorTextQuaternary};
+    font-size: ${cssVar.fontSize};
+    color: ${cssVar.colorTextQuaternary};
   `,
   icon: css`
     position: absolute;
@@ -49,33 +48,33 @@ const useStyles = createStyles(({ css, token }) => ({
 
     width: 30px;
     height: 30px;
-    border-radius: 8px;
+    border-radius: ${cssVar.borderRadius};
   `,
   icon1: css`
     inset-block-start: 15px;
     inset-inline-start: 100px;
-    color: ${token.geekblue};
-    background: ${token.geekblue1};
+    color: ${cssVar.geekblue};
+    background: ${cssVar.geekblue1};
   `,
   icon2: css`
     inset-block-start: 143px;
     inset-inline-start: 174px;
-    color: ${token.colorSuccess};
-    background: ${token.colorSuccessBg};
+    color: ${cssVar.colorSuccess};
+    background: ${cssVar.colorSuccessBg};
   `,
   icon3: css`
     inset-block-start: 143px;
     inset-inline-start: 26px;
-    color: ${token.purple};
-    background: ${token.purple1};
+    color: ${cssVar.purple};
+    background: ${cssVar.purple1};
   `,
   orbit: css`
     position: absolute;
     inset: 0;
 
     margin: auto;
-    border: 1px dashed ${token.colorBorderSecondary};
-    border-radius: 50%;
+    border: 1px dashed ${cssVar.colorBorderSecondary};
+    border-radius: 999px;
   `,
   orbit1: css`
     width: 200px;
@@ -97,9 +96,6 @@ const useStyles = createStyles(({ css, token }) => ({
 }));
 
 const PendingState = memo(({ hint }: { hint?: string }) => {
-  const { t } = useTranslation('eval');
-  const { cx, styles } = useStyles();
-
   return (
     <div className={styles.container}>
       <div className={styles.orbitGroup}>

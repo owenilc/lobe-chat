@@ -1,12 +1,26 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
+exports[`SkillContextProvider > should directly inject content for activated skills 1`] = `
+"<task_guides>
+Use \`lh task\` to manage tasks.
+</task_guides>
+
+<available_skills>
+  <skill name="Artifacts">Generate interactive UI components</skill>
+</available_skills>
+
+Use the activateSkill tool to activate a skill when needed."
+`;
+
+exports[`SkillContextProvider > should handle all skills activated (no available_skills list) 1`] = `"Task skill content here"`;
+
 exports[`SkillContextProvider > should inject skill metadata when skills are provided 1`] = `
 "<available_skills>
   <skill name="Artifacts" location="/path/to/skills/artifacts/SKILL.md">Generate interactive UI components</skill>
   <skill name="My Skill">Custom skill description</skill>
 </available_skills>
 
-Use the runSkill tool to activate a skill when needed."
+Use the activateSkill tool to activate a skill when needed."
 `;
 
 exports[`SkillContextProvider > should merge with existing system message 1`] = `
@@ -17,7 +31,7 @@ exports[`SkillContextProvider > should merge with existing system message 1`] = 
   <skill name="My Skill">Custom skill description</skill>
 </available_skills>
 
-Use the runSkill tool to activate a skill when needed."
+Use the activateSkill tool to activate a skill when needed."
 `;
 
 exports[`SkillContextProvider > should only inject lightweight metadata without content field 1`] = `
@@ -25,7 +39,7 @@ exports[`SkillContextProvider > should only inject lightweight metadata without 
   <skill name="Artifacts" location="/path/to/skills/artifacts/SKILL.md">Generate interactive UI components</skill>
 </available_skills>
 
-Use the runSkill tool to activate a skill when needed."
+Use the activateSkill tool to activate a skill when needed."
 `;
 
 exports[`SkillContextProvider > should render XML with location attribute 1`] = `
@@ -34,7 +48,7 @@ exports[`SkillContextProvider > should render XML with location attribute 1`] = 
   <skill name="Data Analysis" location="/path/to/skills/data-analysis/SKILL.md">Analyzes datasets and generates charts</skill>
 </available_skills>
 
-Use the runSkill tool to activate a skill when needed."
+Use the activateSkill tool to activate a skill when needed."
 `;
 
 exports[`SkillContextProvider > should render XML without location when not provided 1`] = `
@@ -42,5 +56,5 @@ exports[`SkillContextProvider > should render XML without location when not prov
   <skill name="My Skill">Custom skill description</skill>
 </available_skills>
 
-Use the runSkill tool to activate a skill when needed."
+Use the activateSkill tool to activate a skill when needed."
 `;

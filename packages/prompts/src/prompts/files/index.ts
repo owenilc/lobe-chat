@@ -1,9 +1,17 @@
-import type { ChatFileItem, ChatImageItem, ChatVideoItem } from '@lobechat/types';
+import type { ChatAudioItem, ChatFileItem, ChatImageItem, ChatVideoItem } from '@lobechat/types';
 
+import { audiosPrompts } from './audio';
 import { filePrompts } from './file';
 import { imagesPrompts } from './image';
 import { videosPrompts } from './video';
 
+export {
+  FILE_INLINE_MAX_CHARS,
+  FILE_PREVIEW_CHARS,
+  isOversizedFileContent,
+  previewLongFileContent,
+  readAttachmentContinuation,
+} from './file';
 export type { KnowledgeBaseInfo, PromptKnowledgeOptions } from './knowledgeBase';
 export { promptAgentKnowledge } from './knowledgeBase';
 
@@ -11,23 +19,32 @@ export const filesPrompts = ({
   imageList,
   fileList,
   videoList,
+  audioList,
   addUrl = true,
+  canReadAttachment = false,
+  messageId,
 }: {
   addUrl?: boolean;
+  /** Whether `readAttachment` is in the request's tool set; see `PreviewLongFileContentOptions`. */
+  canReadAttachment?: boolean;
+  audioList?: ChatAudioItem[];
   fileList?: ChatFileItem[];
   imageList?: ChatImageItem[];
+  messageId?: string;
   videoList?: ChatVideoItem[];
 }) => {
   const hasImages = (imageList || []).length > 0;
   const hasFiles = (fileList || []).length > 0;
   const hasVideos = (videoList || []).length > 0;
+  const hasAudios = (audioList || []).length > 0;
 
-  if (!hasImages && !hasFiles && !hasVideos) return '';
+  if (!hasImages && !hasFiles && !hasVideos && !hasAudios) return '';
 
   const contentParts = [
-    hasImages ? imagesPrompts(imageList!, addUrl) : '',
-    hasFiles ? filePrompts(fileList!, addUrl) : '',
-    hasVideos ? videosPrompts(videoList!, addUrl) : '',
+    hasImages ? imagesPrompts(imageList!, addUrl, messageId) : '',
+    hasFiles ? filePrompts(fileList!, addUrl, canReadAttachment) : '',
+    hasVideos ? videosPrompts(videoList!, addUrl, messageId) : '',
+    hasAudios ? audiosPrompts(audioList!, addUrl, messageId) : '',
   ].filter(Boolean);
 
   const prompt = `<!-- SYSTEM CONTEXT (NOT PART OF USER QUERY) -->

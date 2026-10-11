@@ -5,6 +5,12 @@ import type { ChatModelCard } from '@lobechat/types';
 import debug from 'debug';
 import type { Pricing } from 'model-bank';
 
+import { ErrorClassifier } from '../../errors';
+import { stripUnsupportedClaudeAssistantPrefill } from '../../providers/anthropic/claudePrefill';
+import {
+  isAlwaysThinkingClaudeModel,
+  rejectsDisabledThinkingAtEffort,
+} from '../../providers/anthropic/modelId';
 import type {
   ChatCompletionErrorPayload,
   ChatMethodOptions,
@@ -16,12 +22,13 @@ import type {
 import type { ILobeAgentRuntimeErrorType } from '../../types/error';
 import { AgentRuntimeErrorType } from '../../types/error';
 import { AgentRuntimeError } from '../../utils/createError';
-import { debugStream } from '../../utils/debugStream';
+import { debugPayload, debugStream } from '../../utils/debugStream';
 import { desensitizeUrl } from '../../utils/desensitizeUrl';
 import { getModelPricing } from '../../utils/getModelPricing';
-import { isExceededContextWindowError } from '../../utils/isExceededContextWindowError';
-import { isQuotaLimitError } from '../../utils/isQuotaLimitError';
+import type { ModelIdMappingOptions } from '../../utils/modelIdMapping';
+import { resolveMappedModelId } from '../../utils/modelIdMapping';
 import { MODEL_LIST_CONFIGS, processModelList } from '../../utils/modelParse';
+import { ContextExceededPreFlightError } from '../../utils/resolveSafeMaxTokens';
 import { StreamingResponse } from '../../utils/response';
 import type { LobeRuntimeAI } from '../BaseAI';
 import {
@@ -30,18 +37,49 @@ import {
   buildSearchTool,
 } from '../contextBuilders/anthropic';
 import { resolveModelSamplingParameters } from '../parameterResolver';
-import { AnthropicStream } from '../streams';
+import { AnthropicStream, type AnthropicStreamOptions } from '../streams';
+import { readableFromAsyncIterable } from '../streams/protocol';
 import { type ComputeChatCostOptions } from '../usageConverters/utils/computeChatCost';
-import { createAnthropicGenerateObject } from './generateObject';
+import {
+  type AnthropicGenerateObjectConfig,
+  createAnthropicGenerateObject,
+} from './generateObject';
 import { handleAnthropicError } from './handleAnthropicError';
+import {
+  initializeAnthropicDiagnostics,
+  observeAnthropicStream,
+  recordAnthropicNonStreamingResponse,
+  recordAnthropicResponseMetadata,
+} from './providerDiagnostics';
 import { resolveCacheTTL } from './resolveCacheTTL';
 import { resolveMaxTokens } from './resolveMaxTokens';
+import { resolveClaudeThinkingConfig } from './resolveThinkingConfig';
 
-type ConstructorOptions<T extends Record<string, any> = any> = ClientOptions & T;
+type ConstructorOptions<T extends Record<string, any> = any> = ClientOptions &
+  ModelIdMappingOptions &
+  T;
 
 type AnthropicTools = Anthropic.Tool | Anthropic.WebSearchTool20250305;
 
 export const DEFAULT_ANTHROPIC_BASE_URL = 'https://api.anthropic.com';
+const ANTHROPIC_CLIENT_TIMEOUT_ENV = 'ANTHROPIC_CLIENT_TIMEOUT';
+/**
+ * Keep Anthropic SDK's timeout explicit so non-streaming structured output
+ * calls with large max_tokens do not hit the SDK's long-request guard before
+ * the request is sent. The default stays below Vercel Hobby's 300s function
+ * duration limit while provider/router options can still override it.
+ */
+export const DEFAULT_ANTHROPIC_TIMEOUT = 295_000;
+const ANTHROPIC_SDK_MESSAGES_PATH_PATTERN = /\/v1(?:\/messages)?\/?$/;
+
+const normalizeAnthropicCompatibleBaseURL = (baseURL?: string | null) =>
+  baseURL?.replace(ANTHROPIC_SDK_MESSAGES_PATH_PATTERN, '');
+
+const resolveDefaultAnthropicTimeout = () => {
+  const timeout = Number(process.env[ANTHROPIC_CLIENT_TIMEOUT_ENV]);
+
+  return Number.isInteger(timeout) && timeout > 0 ? timeout : DEFAULT_ANTHROPIC_TIMEOUT;
+};
 
 export interface CustomClientOptions<T extends Record<string, any> = any> {
   createClient?: (options: ConstructorOptions<T>) => Anthropic;
@@ -91,6 +129,7 @@ export interface AnthropicCompatibleFactoryOptions<T extends Record<string, any>
     payload: GenerateObjectPayload,
     options?: GenerateObjectOptions,
     pricing?: Pricing,
+    config?: AnthropicGenerateObjectConfig,
   ) => Promise<any>;
   models?: (params: {
     apiKey?: string;
@@ -156,38 +195,33 @@ export const buildDefaultAnthropicPayload = async (
       ] as Anthropic.TextBlockParam[])
     : undefined;
 
-  const postMessages = await buildAnthropicMessages(userMessages, { enabledContextCaching });
-
-  // Claude 4.6 models do not support assistant turn prefill
-  if (model.includes('-4-6') && postMessages.at(-1)?.role === 'assistant') {
-    postMessages.pop();
-  }
+  const postMessages = stripUnsupportedClaudeAssistantPrefill(
+    model,
+    await buildAnthropicMessages(userMessages, { enabledContextCaching }),
+  );
 
   let postTools = buildAnthropicTools(tools, { enabledContextCaching }) as
-    | AnthropicTools[]
-    | undefined;
+    AnthropicTools[] | undefined;
 
   if (enabledSearch) {
     const webSearchTool = buildSearchTool();
     postTools = postTools?.length ? [...postTools, webSearchTool] : [webSearchTool];
   }
 
-  if (!!thinking && (thinking.type === 'enabled' || thinking.type === 'adaptive')) {
-    const resolvedThinking: Anthropic.MessageCreateParams['thinking'] =
-      thinking.type === 'enabled'
-        ? {
-            budget_tokens: Math.min(thinking?.budget_tokens || 1024, resolvedMaxTokens - 1),
-            type: 'enabled',
-          }
-        : { type: 'adaptive' };
+  const resolvedThinking = resolveClaudeThinkingConfig({
+    maxTokens: resolvedMaxTokens,
+    model,
+    thinking,
+  });
 
+  if (resolvedThinking && resolvedThinking.type !== 'disabled') {
     return {
       max_tokens: resolvedMaxTokens,
       messages: postMessages,
       model,
       ...(effort ? { output_config: { effort } } : {}),
       system: systemPrompts,
-      thinking: resolvedThinking,
+      thinking: resolvedThinking as Anthropic.MessageCreateParams['thinking'],
       tools: postTools as Anthropic.MessageCreateParams['tools'],
     } as Anthropic.MessageCreateParams;
   }
@@ -200,6 +234,12 @@ export const buildDefaultAnthropicPayload = async (
     { normalizeTemperature: true, preferTemperature: true },
   );
 
+  // Claude Opus 5 and later reject disabled thinking at effort `xhigh` / `max`; every lower
+  // effort level stays valid, so only that pairing is dropped.
+  const forwardsEffort =
+    !!effort &&
+    !(resolvedThinking?.type === 'disabled' && rejectsDisabledThinkingAtEffort(model, effort));
+
   // Support effort parameter even without thinking (per Claude 4.6 guidance)
   const basePayload: Anthropic.MessageCreateParams = {
     max_tokens: resolvedMaxTokens,
@@ -208,11 +248,14 @@ export const buildDefaultAnthropicPayload = async (
     system: systemPrompts,
     temperature: resolvedSamplingParams.temperature,
     tools: postTools as Anthropic.MessageCreateParams['tools'],
+    ...(resolvedThinking
+      ? { thinking: resolvedThinking as Anthropic.MessageCreateParams['thinking'] }
+      : {}),
     top_p: resolvedSamplingParams.top_p,
   };
 
-  // If effort is specified without thinking mode, add output_config
-  if (effort) {
+  // If effort is specified without an incompatible thinking mode, add output_config
+  if (forwardsEffort) {
     return {
       ...basePayload,
       output_config: { effort },
@@ -246,13 +289,19 @@ export const createDefaultAnthropicClient = <T extends Record<string, any> = any
   options: ConstructorOptions<T>,
 ) => {
   const betaHeaders = process.env.ANTHROPIC_BETA_HEADERS;
+  const baseURL = normalizeAnthropicCompatibleBaseURL(options.baseURL);
   const defaultHeaders = {
     'User-Agent': `lobehub/${CURRENT_VERSION}`,
     ...options.defaultHeaders,
     ...(betaHeaders ? { 'anthropic-beta': betaHeaders } : {}),
   };
 
-  return new Anthropic({ ...options, defaultHeaders });
+  return new Anthropic({
+    ...options,
+    ...(baseURL ? { baseURL } : {}),
+    defaultHeaders,
+    timeout: options.timeout ?? resolveDefaultAnthropicTimeout(),
+  });
 };
 
 /**
@@ -261,7 +310,12 @@ export const createDefaultAnthropicClient = <T extends Record<string, any> = any
 export const handleDefaultAnthropicError = <T extends Record<string, any> = any>(
   error: any,
   options: ConstructorOptions<T>,
+  errorType?: AnthropicCompatibleFactoryOptions<T>['errorType'],
 ): Omit<ChatCompletionErrorPayload, 'provider'> => {
+  const ErrorType = {
+    bizError: errorType?.bizError || AgentRuntimeErrorType.ProviderBizError,
+    invalidAPIKey: errorType?.invalidAPIKey || AgentRuntimeErrorType.InvalidProviderAPIKey,
+  };
   const baseURL =
     typeof options.baseURL === 'string' && options.baseURL
       ? options.baseURL
@@ -275,7 +329,7 @@ export const handleDefaultAnthropicError = <T extends Record<string, any> = any>
         return {
           endpoint: desensitizedEndpoint,
           error: error as any,
-          errorType: AgentRuntimeErrorType.InvalidProviderAPIKey,
+          errorType: ErrorType.invalidAPIKey,
         };
       }
       case 403: {
@@ -285,35 +339,64 @@ export const handleDefaultAnthropicError = <T extends Record<string, any> = any>
           errorType: AgentRuntimeErrorType.LocationNotSupportError,
         };
       }
+      case 413: {
+        return {
+          endpoint: desensitizedEndpoint,
+          error: error as any,
+          errorType: AgentRuntimeErrorType.RequestBodyTooLarge,
+        };
+      }
       default: {
         break;
       }
     }
   }
 
-  const { errorResult } = handleAnthropicError(error);
+  const { errorResult, message } = handleAnthropicError(error);
 
   const errorMsg = errorResult.message || errorResult.error?.message;
-  if (isExceededContextWindowError(errorMsg)) {
+
+  if (ErrorClassifier.isAccountDeactivated(errorMsg)) {
+    return {
+      endpoint: desensitizedEndpoint,
+      error: errorResult,
+      errorType: AgentRuntimeErrorType.AccountDeactivated,
+      message,
+    };
+  }
+
+  if (ErrorClassifier.isInsufficientQuota(errorMsg)) {
+    return {
+      endpoint: desensitizedEndpoint,
+      error: errorResult,
+      errorType: AgentRuntimeErrorType.InsufficientQuota,
+      message,
+    };
+  }
+
+  if (ErrorClassifier.isExceededContextWindow(errorMsg)) {
     return {
       endpoint: desensitizedEndpoint,
       error: errorResult,
       errorType: AgentRuntimeErrorType.ExceededContextWindow,
+      message,
     };
   }
 
-  if (isQuotaLimitError(errorMsg)) {
+  if (ErrorClassifier.isRateLimitExceeded(errorMsg)) {
     return {
       endpoint: desensitizedEndpoint,
       error: errorResult,
       errorType: AgentRuntimeErrorType.QuotaLimitReached,
+      message,
     };
   }
 
   return {
     endpoint: desensitizedEndpoint,
     error: errorResult,
-    errorType: AgentRuntimeErrorType.ProviderBizError,
+    errorType: ErrorType.bizError,
+    message,
   };
 };
 
@@ -380,7 +463,6 @@ export const createAnthropicCompatibleParams = <T extends Record<string, any> = 
     baseURL,
     chatCompletion: {
       getPricingOptions: resolveDefaultAnthropicPricingOptions,
-      handleError: handleDefaultAnthropicError,
       handlePayload: buildDefaultAnthropicPayload,
       ...chatCompletion,
     },
@@ -412,19 +494,30 @@ export const createAnthropicCompatibleRuntime = <T extends Record<string, any> =
 
     private id: string;
     private logPrefix: string;
+    private modelIdMappingOptions: ModelIdMappingOptions = {};
 
     baseURL!: string;
     protected _options: ConstructorOptions<T>;
 
     constructor(options: ClientOptions & Record<string, any> = {}) {
-      const apiKey = typeof options.apiKey === 'string' ? options.apiKey.trim() : options.apiKey;
-      const baseURL =
-        typeof options.baseURL === 'string' ? options.baseURL.trim() : options.baseURL;
+      const { modelIdMapping, ...inputOptions } = options as ClientOptions &
+        Record<string, any> &
+        ModelIdMappingOptions;
+      const apiKey =
+        typeof inputOptions.apiKey === 'string' ? inputOptions.apiKey.trim() : inputOptions.apiKey;
+      const inputBaseURL =
+        typeof inputOptions.baseURL === 'string'
+          ? inputOptions.baseURL.trim()
+          : inputOptions.baseURL;
+      // Anthropic SDK appends `/v1/messages`; normalize gateway URLs that already
+      // include that SDK-managed path segment before constructing any client.
+      const baseURL = normalizeAnthropicCompatibleBaseURL(inputBaseURL);
+      const defaultBaseURL = normalizeAnthropicCompatibleBaseURL(DEFAULT_BASE_URL);
 
       const resolvedOptions = {
-        ...options,
+        ...inputOptions,
         apiKey: apiKey || DEFAULT_API_KEY,
-        baseURL: baseURL || DEFAULT_BASE_URL,
+        baseURL: baseURL || defaultBaseURL,
       };
       const {
         apiKey: finalApiKey,
@@ -432,6 +525,7 @@ export const createAnthropicCompatibleRuntime = <T extends Record<string, any> =
         ...rest
       } = resolvedOptions;
       this._options = resolvedOptions as ConstructorOptions<T>;
+      this.modelIdMappingOptions = { modelIdMapping };
 
       if (!finalApiKey) throw AgentRuntimeError.createError(ErrorType.invalidAPIKey);
 
@@ -440,6 +534,7 @@ export const createAnthropicCompatibleRuntime = <T extends Record<string, any> =
         baseURL: finalBaseURL,
         ...constructorOptions,
         ...rest,
+        timeout: rest.timeout ?? constructorOptions?.timeout ?? resolveDefaultAnthropicTimeout(),
       };
 
       if (customClient?.createClient) {
@@ -448,9 +543,23 @@ export const createAnthropicCompatibleRuntime = <T extends Record<string, any> =
         this.client = new Anthropic(initOptions as ConstructorOptions<T>);
       }
 
-      this.baseURL = baseURL || this.client.baseURL;
+      this.baseURL = finalBaseURL || this.client.baseURL;
       this.id = options.id || provider;
       this.logPrefix = `lobe-model-runtime:${this.id}`;
+    }
+
+    private withMappedRequestModel<TPayload extends { model?: string }>(
+      requestPayload: TPayload,
+      logicalModel: string,
+    ): TPayload {
+      if (!requestPayload.model) return requestPayload;
+
+      const mappedModel = resolveMappedModelId(logicalModel, this.modelIdMappingOptions);
+      if (requestPayload.model !== logicalModel || mappedModel === requestPayload.model) {
+        return requestPayload;
+      }
+
+      return { ...requestPayload, model: mappedModel };
     }
 
     async chat(payload: ChatStreamPayload, options?: ChatMethodOptions) {
@@ -467,46 +576,107 @@ export const createAnthropicCompatibleRuntime = <T extends Record<string, any> =
         const postPayload = await chatCompletion.handlePayload(payload, this._options);
         const shouldStream = postPayload.stream ?? payload.stream ?? true;
         const finalPayload = { ...postPayload, stream: shouldStream };
+        const requestPayload = this.withMappedRequestModel(finalPayload, payload.model);
 
-        if (debugParams?.chatCompletion?.()) {
-          // eslint-disable-next-line no-console
-          console.log('[requestPayload]');
-          // eslint-disable-next-line no-console
-          console.log(JSON.stringify(finalPayload), '\n');
+        // Re-apply the prefill guard against the ACTUAL request model:
+        // handlePayload stripped by the logical id, but a custom logical id the
+        // parser doesn't recognize can map to a Claude 4.6+/5 request model
+        // here. The strip is idempotent, so this is a no-op otherwise.
+        if (requestPayload.model && Array.isArray(requestPayload.messages)) {
+          requestPayload.messages = stripUnsupportedClaudeAssistantPrefill(
+            requestPayload.model,
+            requestPayload.messages,
+          );
         }
 
-        const response = await this.client.messages.create(
-          {
-            ...finalPayload,
-            metadata: options?.user ? { user_id: options.user } : undefined,
-          },
-          {
-            headers: options?.requestHeaders,
-            signal: options?.signal,
-          },
-        );
+        // Same for disabled thinking: handlePayload resolved it by the logical id, but the
+        // mapped request model may be an always-thinking Claude that rejects `disabled` with a
+        // 400. Omitting the config is the documented fallback (see resolveClaudeThinkingConfig).
+        if (
+          requestPayload.model &&
+          (requestPayload as { thinking?: { type?: string } }).thinking?.type === 'disabled' &&
+          isAlwaysThinkingClaudeModel(requestPayload.model)
+        ) {
+          delete (requestPayload as { thinking?: unknown }).thinking;
+        }
 
-        const pricing = await getModelPricing(payload.model, this.id);
+        const shouldDebugChatCompletion = debugParams?.chatCompletion?.() ?? false;
+        if (shouldDebugChatCompletion) {
+          debugPayload(requestPayload);
+        }
+
+        const providerRequestPayload = {
+          ...requestPayload,
+          metadata: options?.user ? { user_id: options.user } : undefined,
+        };
+        const providerRequestStartedAt = Date.now();
+        const providerResponseDiagnostics = initializeAnthropicDiagnostics({
+          diagnostics: options?.diagnostics,
+          endpoint: desensitizeUrl(this.baseURL),
+          payload: providerRequestPayload,
+          sentAt: providerRequestStartedAt,
+        });
+        const responsePromise = this.client.messages.create(providerRequestPayload, {
+          headers: options?.requestHeaders,
+          signal: options?.signal,
+        });
+        /**
+         * Custom Anthropic-compatible clients may return a plain Promise instead
+         * of the SDK's APIPromise. Prefer withResponse() for request IDs and safe
+         * headers, while preserving compatibility with those clients.
+         */
+        const responseWithMetadata =
+          typeof responsePromise.withResponse === 'function'
+            ? await responsePromise.withResponse()
+            : { data: await responsePromise };
+        const response = responseWithMetadata.data;
+        recordAnthropicResponseMetadata(providerResponseDiagnostics, {
+          requestId:
+            'request_id' in responseWithMetadata ? responseWithMetadata.request_id : undefined,
+          response: 'response' in responseWithMetadata ? responseWithMetadata.response : undefined,
+        });
+
+        const pricing = await getModelPricing(payload.model, this.id, options?.pricingContext);
         const pricingOptions = await chatCompletion?.getPricingOptions?.(payload, postPayload);
         const streamOptions = {
           callbacks: options?.callback,
           payload: {
+            apiMode: 'messages',
             model: payload.model,
             pricing,
             pricingOptions,
             provider: this.id,
           },
-        };
+        } satisfies Pick<AnthropicStreamOptions, 'callbacks' | 'payload'>;
 
         if (shouldStream) {
-          const streamResponse = response as Stream<Anthropic.MessageStreamEvent>;
-          const [prod, useForDebug] = streamResponse.tee();
+          const streamResponse = response as
+            Stream<Anthropic.MessageStreamEvent> | ReadableStream<Anthropic.MessageStreamEvent>;
+          let prod: Stream<Anthropic.MessageStreamEvent> | ReadableStream = streamResponse;
 
-          if (debugParams?.chatCompletion?.()) {
+          if (shouldDebugChatCompletion) {
+            const [productionStream, useForDebug] = streamResponse.tee();
+            prod = productionStream;
             const useForDebugStream =
               useForDebug instanceof ReadableStream ? useForDebug : useForDebug.toReadableStream();
 
             debugStream(useForDebugStream).catch(console.error);
+          }
+
+          if (providerResponseDiagnostics) {
+            /** Observe provider-native events before the protocol adapter transforms them. */
+            const observedStream = observeAnthropicStream(
+              prod,
+              providerResponseDiagnostics,
+              options?.signal,
+            );
+            prod =
+              observedStream instanceof ReadableStream
+                ? observedStream
+                : readableFromAsyncIterable(observedStream, {
+                    model: payload.model,
+                    provider: this.id,
+                  });
           }
 
           return StreamingResponse(
@@ -522,6 +692,12 @@ export const createAnthropicCompatibleRuntime = <T extends Record<string, any> =
             },
           );
         }
+
+        await recordAnthropicNonStreamingResponse(
+          providerResponseDiagnostics,
+          response as Anthropic.Message,
+          options?.signal,
+        );
 
         if (payload.responseMode === 'json') {
           return Response.json(response);
@@ -618,8 +794,10 @@ export const createAnthropicCompatibleRuntime = <T extends Record<string, any> =
       }
 
       try {
-        const pricing = await getModelPricing(payload.model, this.id);
-        return await generateObject(this.client, payload, options, pricing);
+        const pricing = await getModelPricing(payload.model, this.id, options?.pricingContext);
+        return await generateObject(this.client, payload, options, pricing, {
+          requestModel: resolveMappedModelId(payload.model, this.modelIdMappingOptions),
+        });
       } catch (error) {
         throw this.handleError(error);
       }
@@ -643,6 +821,16 @@ export const createAnthropicCompatibleRuntime = <T extends Record<string, any> =
         desensitizedEndpoint = desensitizeUrl(this.baseURL);
       }
 
+      if (error instanceof ContextExceededPreFlightError) {
+        return AgentRuntimeError.chat({
+          endpoint: desensitizedEndpoint,
+          error: error.toPayload(),
+          errorType: AgentRuntimeErrorType.ExceededContextWindow,
+          message: error.message,
+          provider: this.id,
+        });
+      }
+
       if (chatCompletion?.handleError) {
         const errorResult = chatCompletion.handleError(error, this._options);
         if (errorResult)
@@ -652,67 +840,11 @@ export const createAnthropicCompatibleRuntime = <T extends Record<string, any> =
           } as ChatCompletionErrorPayload);
       }
 
-      if ('status' in (error as any)) {
-        switch ((error as Response).status) {
-          case 401: {
-            return AgentRuntimeError.chat({
-              endpoint: desensitizedEndpoint,
-              error: error as any,
-              errorType: ErrorType.invalidAPIKey,
-              provider: this.id,
-            });
-          }
-          case 403: {
-            return AgentRuntimeError.chat({
-              endpoint: desensitizedEndpoint,
-              error: error as any,
-              errorType: AgentRuntimeErrorType.LocationNotSupportError,
-              provider: this.id,
-            });
-          }
-          default: {
-            break;
-          }
-        }
-      }
-
-      const errorResult = (() => {
-        if (error?.error) {
-          const innerError = error.error;
-          if ('error' in innerError) {
-            return innerError.error;
-          }
-          return innerError;
-        }
-
-        return { headers: error?.headers, stack: error?.stack, status: error?.status };
-      })();
-
-      const errorMsg = errorResult.message || errorResult.error?.message;
-      if (isExceededContextWindowError(errorMsg)) {
-        return AgentRuntimeError.chat({
-          endpoint: desensitizedEndpoint,
-          error: errorResult,
-          errorType: AgentRuntimeErrorType.ExceededContextWindow,
-          provider: this.id,
-        });
-      }
-
-      if (isQuotaLimitError(errorMsg)) {
-        return AgentRuntimeError.chat({
-          endpoint: desensitizedEndpoint,
-          error: errorResult,
-          errorType: AgentRuntimeErrorType.QuotaLimitReached,
-          provider: this.id,
-        });
-      }
-
+      const errorResult = handleDefaultAnthropicError(error, this._options, errorType);
       return AgentRuntimeError.chat({
-        endpoint: desensitizedEndpoint,
-        error: errorResult,
-        errorType: ErrorType.bizError,
+        ...errorResult,
         provider: this.id,
-      });
+      } as ChatCompletionErrorPayload);
     }
   };
 };

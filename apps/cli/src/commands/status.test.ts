@@ -1,23 +1,23 @@
 import { Command } from 'commander';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { loadSettings, saveSettings } from '../settings';
+import { log } from '../utils/logger';
+import { registerStatusCommand } from './status';
+
 // Mock resolveToken
 vi.mock('../auth/resolveToken', () => ({
-  resolveToken: vi.fn().mockResolvedValue({ token: 'test-token', userId: 'test-user' }),
+  resolveToken: vi.fn().mockResolvedValue({
+    serverUrl: 'https://app.lobehub.com',
+    token: 'test-token',
+    tokenType: 'jwt',
+    userId: 'test-user',
+  }),
 }));
 vi.mock('../settings', () => ({
   loadSettings: vi.fn().mockReturnValue(null),
+  normalizeUrl: vi.fn((url?: string) => (url ? url.replace(/\/$/, '') : undefined)),
   saveSettings: vi.fn(),
-}));
-
-vi.mock('../utils/logger', () => ({
-  log: {
-    debug: vi.fn(),
-    error: vi.fn(),
-    info: vi.fn(),
-    warn: vi.fn(),
-  },
-  setVerbose: vi.fn(),
 }));
 
 // Track event handlers registered on GatewayClient instances
@@ -26,7 +26,9 @@ let connectCalled = false;
 let clientOptions: any = {};
 
 vi.mock('@lobechat/device-gateway-client', () => ({
-  GatewayClient: vi.fn().mockImplementation((opts: any) => {
+  // A plain function, not an arrow: the command calls `new GatewayClient(...)`,
+  // and an arrow implementation is not constructible.
+  GatewayClient: vi.fn().mockImplementation(function (opts: any) {
     clientOptions = opts;
     clientEventHandlers = {};
     connectCalled = false;
@@ -41,13 +43,6 @@ vi.mock('@lobechat/device-gateway-client', () => ({
     };
   }),
 }));
-
-// eslint-disable-next-line import-x/first
-import { loadSettings, saveSettings } from '../settings';
-// eslint-disable-next-line import-x/first
-import { log } from '../utils/logger';
-// eslint-disable-next-line import-x/first
-import { registerStatusCommand } from './status';
 
 describe('status command', () => {
   let exitSpy: ReturnType<typeof vi.spyOn>;
@@ -115,6 +110,16 @@ describe('status command', () => {
       serverUrl: 'https://self-hosted.example.com',
     });
   });
+  it('should pass the resolved serverUrl to GatewayClient', async () => {
+    const program = createProgram();
+    const parsePromise = program.parseAsync(['node', 'test', 'status']);
+    await vi.advanceTimersByTimeAsync(0);
+
+    clientEventHandlers['connected']?.();
+
+    await parsePromise;
+    expect(clientOptions.serverUrl).toBe('https://app.lobehub.com');
+  });
 
   it('should log CONNECTED on successful connection', async () => {
     const program = createProgram();
@@ -126,6 +131,19 @@ describe('status command', () => {
     await parsePromise;
     expect(log.info).toHaveBeenCalledWith('CONNECTED');
     expect(exitSpy).toHaveBeenCalledWith(0);
+  });
+
+  it('should point a failed handshake at doctor', async () => {
+    const program = createProgram();
+    const parsePromise = program.parseAsync(['node', 'test', 'status']);
+    await vi.advanceTimersByTimeAsync(0);
+
+    clientEventHandlers['auth_failed']?.('signature verification failed');
+
+    await parsePromise;
+    expect(log.error).toHaveBeenCalledWith(
+      "Run 'lh doctor --profile connect' for a full diagnosis.",
+    );
   });
 
   it('should log FAILED on disconnected', async () => {

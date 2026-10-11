@@ -1,6 +1,7 @@
 ---
 name: spa-routes
-description: SPA route and feature structure. Use when adding or modifying SPA routes in src/routes, defining new route segments, or moving route logic into src/features. Covers how to keep routes thin and how to divide files between routes and features.
+description: 'Use for SPA routes and page segments: Web/desktop/mobile/popup routers, redirects and src/routes-to-features boundaries.'
+user-invocable: false
 ---
 
 # SPA Routes and Features Guide
@@ -12,6 +13,8 @@ SPA structure:
 - **`src/features/`** – Business logic and UI by domain.
 
 This project uses a **roots vs features** split: `src/routes/` only holds page segments; business logic and UI live in `src/features/` by domain.
+
+**Agent constraint — shared desktop router:** Common Web/Electron paths, nesting, metadata, lazy loaders, and preload groups belong in `src/spa/router/desktopRouter.shared.tsx`. The two `desktopRouter.config*` files are thin platform adapters; change them only for genuine runtime differences. Do not duplicate a common route in both adapters.
 
 ## When to Use This Skill
 
@@ -73,8 +76,52 @@ Each feature should:
    - Layout: `export { default } from '@/features/MyFeature/MyLayout'` or compose a few feature components + `<Outlet />`.
    - Page: import from `@/features/MyFeature` (or a specific subpath) and render; no business logic in the route file.
 
-5. **Register the route**
-   - Add the segment to `src/spa/router/desktopRouter.config.tsx` (or the right router config) with `dynamicElement` / `dynamicLayout` pointing at the new route paths (e.g. `@/routes/(main)/my-feature`).
+5. **Register the route in the correct definition layer**
+   - **Shared Web/Electron route:** add the segment once in `desktopRouter.shared.tsx` with `dynamicElement` / `dynamicLayout`. Put its `preloadId` there as part of the shared lazy-loader definition.
+   - **Web-only or Electron-only route:** add it to the corresponding thin `desktopRouter.config.tsx` adapter. Keep platform-only differences explicit and small.
+   - **Mobile-only flow:** use `mobileRouter.config.tsx`; mobile does not consume the shared desktop tree.
+
+6. **Register a route skeleton (REQUIRED for every lazy route)**
+   - Every lazy route inside the main area renders `RouteSegmentSkeleton` (`src/components/Skeleton/RouteSegment.tsx`) while its chunk loads. It resolves via `handle.meta.Skeleton` only (deepest match wins, walking up through parent routes). Omitting `Skeleton` renders a blank pane — use `NoRouteSkeleton` when that is intentional.
+   - Pick the skeleton when adding or restructuring a route:
+     - A close-enough generic shape exists → `Skeleton: createSurfaceSkeleton('list' | 'form' | 'grid' | 'editor' | 'detail')` from `@/components/Skeleton/Surface`.
+     - The page has a distinctive layout (dashboard, multi-panel, conversation) → author a bespoke component under `src/components/Skeleton/` and register it (see `ResourceHome.tsx`, `Generation.tsx`, `Conversation/`).
+   - Where to put it: on the route's `routeMeta` (feature `routeMeta.ts` or inline in `desktopRouter.shared.tsx`). A whole subtree sharing one shape can register once on the parent/layout route's `handle` — children with their own `Skeleton` still override.
+   - When changing a page's layout, update its registered skeleton in the same PR — a stale skeleton that no longer matches the page is a regression.
+   - Skeleton-only parent handles are safe for titles: title/icon resolution also walks deepest-first, and leaf metas keep winning.
+
+---
+
+## 3a. Shared desktop route definition and platform adapters
+
+| File                               | Role                                                                                                            |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `desktopRouter.shared.tsx`         | Single source of truth for common paths, nesting, metadata, lazy imports, and prioritized route preload groups. |
+| `desktopRouter.config.tsx`         | Thin Web adapter: mounts the common content tree at `/` and adds Web-only routes.                               |
+| `desktopRouter.config.desktop.tsx` | Thin Electron adapter: injects per-tab Home behavior, TabHost root stubs, and Electron-only onboarding.         |
+
+Add or remove common routes only in `desktopRouter.shared.tsx`. Keep `desktopRouter.sync.test.tsx` passing so path behavior, lazy boundaries, preload ownership, and the intentional platform differences remain verified.
+
+---
+
+## 3b. Other `.desktop.{ts,tsx}` variants inside `src/routes/`
+
+The thin router adapters are not duplicated trees. Other route modules may still colocate a `<name>.desktop.{ts,tsx}` next to a base `<name>.{ts,tsx}`; Vite's resolver swaps in the `.desktop` file for Electron builds. Those paired module implementations still carry a drift risk.
+
+Known variants today:
+
+| Base file (web)                                  | Desktop file (Electron)                                  | Purpose                                                                                                                                    |
+| ------------------------------------------------ | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `src/features/Settings/features/componentMap.ts` | `src/features/Settings/features/componentMap.desktop.ts` | Settings tab → component map. Web uses dynamic `import()`; desktop uses sync imports. `componentMap.sync.test.ts` enforces identical keys. |
+| `src/routes/(main)/agent/index.tsx`              | `src/routes/(main)/agent/index.desktop.tsx`              | Page entry. Desktop variant overrides the web page wholesale (e.g. extra popup guards).                                                    |
+| `src/routes/(main)/group/index.tsx`              | `src/routes/(main)/group/index.desktop.tsx`              | Same pattern as agent.                                                                                                                     |
+
+**Rules:**
+
+1. After editing **any** `.ts`/`.tsx` under `src/routes/`, glob the same directory for a `<filename>.desktop.{ts,tsx}` sibling. If one exists, apply the equivalent change there in the same commit.
+2. When adding a new SettingsTab, register it in **both** `componentMap.ts` (with `dynamic(...)`) and `componentMap.desktop.ts` (with a sync `import`). `componentMap.sync.test.ts` will fail the build otherwise.
+3. When adding a new desktop-only page wholesale-override, prefer a single base file with platform-aware code over introducing a new `.desktop.tsx` variant — only add a new variant when the two trees genuinely diverge (different store wiring, different popup guards, etc.).
+4. When deleting, remove **both** files together.
 
 ---
 
@@ -103,10 +150,7 @@ Each feature should:
 
 ## 5. Progressive Migration (existing code)
 
-We are migrating existing routes to this structure step by step:
-
-- **Phase 1 (done):** `/page` route – segment files in `src/routes/(main)/page/`, implementation in `src/features/Pages/`.
-- **Later phases:** home, settings, agent/group, community/resource/memory, mobile/share/onboarding.
+Existing routes follow this structure unevenly: some are already thin segment files (e.g. `src/routes/(main)/page/`, `src/routes/(main)/settings/`), while others still hold logic or a `features/` folder under `src/routes/`. Check the route's current state instead of assuming.
 
 When touching an old route that still has logic or `features/` inside `src/routes/`:
 

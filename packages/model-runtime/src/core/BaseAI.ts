@@ -2,12 +2,17 @@ import type { AIBaseModelCard } from 'model-bank';
 import type OpenAI from 'openai';
 
 import type {
+  ASROptions,
+  ASRPayload,
+  ASRResponse,
   ChatMethodOptions,
   ChatStreamPayload,
+  CreateImageMethodOptions,
   CreateImagePayload,
   CreateImageResponse,
+  CreateVideoMethodOptions,
   CreateVideoPayload,
-  CreateVideoResponse,
+  CreateVideoResult,
   Embeddings,
   EmbeddingsOptions,
   EmbeddingsPayload,
@@ -16,17 +21,26 @@ import type {
   HandleCreateVideoWebhookPayload,
   HandleCreateVideoWebhookResult,
   ModelRequestOptions,
+  PollVideoStatusResult,
   PullModelParams,
   TextToSpeechOptions,
   TextToSpeechPayload,
+  VideoGenerationCapabilities,
+  VideoPollingRoute,
 } from '../types';
 
 export interface LobeRuntimeAI {
   baseURL?: string;
   chat?: (payload: ChatStreamPayload, options?: ChatMethodOptions) => Promise<Response>;
-  createImage?: (payload: CreateImagePayload) => Promise<CreateImageResponse>;
+  createImage?: (
+    payload: CreateImagePayload,
+    options?: CreateImageMethodOptions,
+  ) => Promise<CreateImageResponse>;
 
-  createVideo?: (payload: CreateVideoPayload) => Promise<CreateVideoResponse>;
+  createVideo?: (
+    payload: CreateVideoPayload,
+    options?: CreateVideoMethodOptions,
+  ) => Promise<CreateVideoResult>;
 
   embeddings?: (payload: EmbeddingsPayload, options?: EmbeddingsOptions) => Promise<Embeddings[]>;
 
@@ -35,11 +49,24 @@ export interface LobeRuntimeAI {
     options?: GenerateObjectOptions,
   ) => Promise<any>;
 
+  getVideoGenerationCapabilities?: (model: string) => VideoGenerationCapabilities;
+
   handleCreateVideoWebhook?: (
     payload: HandleCreateVideoWebhookPayload,
   ) => Promise<HandleCreateVideoWebhookResult>;
 
+  handlePollVideoStatus?: (
+    inferenceId: string,
+    model?: string,
+    route?: VideoPollingRoute,
+  ) => Promise<PollVideoStatusResult>;
+
   models?: () => Promise<any>;
+
+  /**
+   * Composite runtimes set this when they resolve completion mode inside their selected route.
+   */
+  orchestratesVideoGenerationCompletion?: boolean;
 
   // Model management related interface
   pullModel?: (params: PullModelParams, options?: ModelRequestOptions) => Promise<Response>;
@@ -48,6 +75,8 @@ export interface LobeRuntimeAI {
     payload: TextToSpeechPayload,
     options?: TextToSpeechOptions,
   ) => Promise<ArrayBuffer>;
+
+  transcribe?: (payload: ASRPayload, options?: ASROptions) => Promise<ASRResponse>;
 }
 /* eslint-enabled */
 
@@ -68,4 +97,8 @@ export abstract class LobeOpenAICompatibleRuntime {
     payload: EmbeddingsPayload,
     options?: EmbeddingsOptions,
   ): Promise<Embeddings[]>;
+
+  transcribe?(payload: ASRPayload, options?: ASROptions): Promise<ASRResponse>;
+
+  textToSpeech?(payload: TextToSpeechPayload, options?: TextToSpeechOptions): Promise<ArrayBuffer>;
 }

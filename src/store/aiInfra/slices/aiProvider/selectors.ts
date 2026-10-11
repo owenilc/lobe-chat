@@ -15,9 +15,14 @@ const disabledAiProviderList = (s: AIProviderStoreState) =>
 const disabledCustomAiProviderList = (s: AIProviderStoreState) =>
   s.aiProviderList.filter((item) => !item.enabled && item.source === AiProviderSourceEnum.Custom);
 
+const enabledEmbeddingModelList = (s: AIProviderStoreState) => s.enabledEmbeddingModelList || [];
+const enabledAsrModelList = (s: AIProviderStoreState) => s.enabledAsrModelList || [];
+
 const enabledImageModelList = (s: AIProviderStoreState) => s.enabledImageModelList || [];
 
 const enabledVideoModelList = (s: AIProviderStoreState) => s.enabledVideoModelList || [];
+
+const hiddenBuiltinModels = (s: AIProviderStoreState) => s.hiddenBuiltinModels;
 
 const isProviderEnabled = (id: string) => (s: AIProviderStoreState) =>
   enabledAiProviderList(s).some((i) => i.id === id);
@@ -44,7 +49,7 @@ const activeProviderConfig = (s: AIProviderStoreState) =>
 const isAiProviderConfigLoading = (id: string) => (s: AIProviderStoreState) =>
   !s.aiProviderDetailMap[id];
 
-const providerWhitelist = new Set(['ollama', 'lmstudio']);
+const providerWhitelist = new Set(['ollama', 'lmstudio', 'unsloth']);
 
 const activeProviderKeyVaults = (s: AIProviderStoreState) => activeProviderConfig(s)?.keyVaults;
 
@@ -137,8 +142,11 @@ export const aiProviderSelectors = {
   disabledAiProviderList,
   disabledCustomAiProviderList,
   enabledAiProviderList,
+  enabledAsrModelList,
+  enabledEmbeddingModelList,
   enabledImageModelList,
   enabledVideoModelList,
+  hiddenBuiltinModels,
   isActiveProviderApiKeyNotEmpty,
   isActiveProviderEndpointNotEmpty,
   isAiProviderConfigLoading,

@@ -1,5 +1,5 @@
 name: Claude Auto E2E Testing
-description: Automatically add E2E tests to improve user journey coverage
+# Automatically add E2E tests to improve user journey coverage
 
 on:
   schedule:
@@ -49,13 +49,13 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+      - name: Setup environment
+        uses: ./.github/actions/setup-env
 
       - name: Install dependencies
-        run: bun install --frozen-lockfile
+        run: pnpm install --frozen-lockfile
 
       - name: Install Playwright browsers (with system deps)
         run: bunx playwright install --with-deps chromium

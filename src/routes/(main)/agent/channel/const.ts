@@ -1,110 +1,70 @@
-import { Discord, Lark, QQ, Telegram } from '@lobehub/ui/icons';
-import type { LucideIcon } from 'lucide-react';
+import * as Icons from '@lobehub/ui/icons';
 import type { FC } from 'react';
 
-export interface ChannelProvider {
-  /** Lark-style auth: appId + appSecret instead of botToken */
-  authMode?: 'app-secret' | 'bot-token';
-  /** Whether applicationId can be auto-derived from the bot token */
-  autoAppId?: boolean;
-  color: string;
-  description: string;
-  docsLink: string;
-  fieldTags: {
-    appId: string;
-    appSecret?: string;
-    encryptKey?: string;
-    publicKey?: string;
-    secretToken?: string;
-    token?: string;
-    verificationToken?: string;
-    webhook?: string;
-  };
-  icon: FC<any> | LucideIcon;
-  id: string;
-  name: string;
-  /** 'manual' = user must copy endpoint URL to platform portal (Discord, Lark);
-   *  'auto' = webhook is set automatically via API (Telegram) */
-  webhookMode?: 'auto' | 'manual';
+import type { SerializedPlatformDefinition } from '@/server/services/bot/platforms/types';
+
+/** Known icon names from @lobehub/ui/icons that correspond to chat platforms. */
+const ICON_NAMES = [
+  'Discord',
+  'GoogleChat',
+  'IMessage',
+  'Lark',
+  'Line',
+  'MicrosoftTeams',
+  'QQ',
+  'Slack',
+  'Telegram',
+  'WeChat',
+  'WhatsApp',
+] as const;
+
+/** Alias map for platforms whose display name differs from the icon name. */
+const ICON_ALIASES: Record<string, string> = {
+  feishu: 'Lark',
+};
+
+/**
+ * Resolve icon component by matching against known icon names.
+ * Accepts either a platform display name (e.g. "Feishu / Lark") or id (e.g. "discord").
+ */
+export function getPlatformIcon(nameOrId: string): FC<any> | undefined {
+  const alias = ICON_ALIASES[nameOrId.toLowerCase()];
+  if (alias) return (Icons as Record<string, any>)[alias];
+
+  const name = ICON_NAMES.find(
+    (n) => nameOrId.includes(n) || nameOrId.toLowerCase() === n.toLowerCase(),
+  );
+  return name ? (Icons as Record<string, any>)[name] : undefined;
 }
 
-export const CHANNEL_PROVIDERS: ChannelProvider[] = [
+/**
+ * Channel platform definition extended with a frontend-only `comingSoon` flag.
+ * Coming-soon platforms are virtual: they appear in the sidebar list and show
+ * a placeholder detail view, but never participate in credentials/runtime flow.
+ */
+export interface ChannelPlatformDefinition extends SerializedPlatformDefinition {
+  comingSoon?: boolean;
+}
+
+/**
+ * Virtual platforms shown in the sidebar with a "Coming Soon" badge.
+ * Not registered on the server — handled entirely on the client.
+ */
+export const COMING_SOON_PLATFORMS: ChannelPlatformDefinition[] = [
   {
-    color: '#5865F2',
-    description: 'channel.discord.description',
-    docsLink: 'https://discord.com/developers/docs/intro',
-    fieldTags: {
-      appId: 'Application ID',
-      publicKey: 'Public Key',
-      token: 'Bot Token',
-    },
-    icon: Discord,
-    id: 'discord',
-    name: 'Discord',
-    webhookMode: 'auto',
+    comingSoon: true,
+    connectionMode: 'webhook',
+    id: 'whatsapp',
+    name: 'WhatsApp',
+    schema: [],
   },
+  // iMessage is registered server-side but lab-gated: shown as a placeholder
+  // unless the `imessage` feature flag is on (see channel/index.tsx).
   {
-    autoAppId: true,
-    color: '#26A5E4',
-    description: 'channel.telegram.description',
-    docsLink: 'https://core.telegram.org/bots#how-do-i-create-a-bot',
-    fieldTags: {
-      appId: 'Bot User ID',
-      secretToken: 'Webhook Secret',
-      token: 'Bot Token',
-    },
-    icon: Telegram,
-    id: 'telegram',
-    name: 'Telegram',
-    webhookMode: 'auto',
-  },
-  {
-    authMode: 'app-secret',
-    color: '#3370FF',
-    description: 'channel.feishu.description',
-    docsLink:
-      'https://open.feishu.cn/document/home/introduction-to-custom-app-development/self-built-application-development-process',
-    fieldTags: {
-      appId: 'App ID',
-      appSecret: 'App Secret',
-      encryptKey: 'Encrypt Key',
-      verificationToken: 'Verification Token',
-      webhook: 'Event Subscription URL',
-    },
-    icon: Lark,
-    id: 'feishu',
-    name: '飞书',
-  },
-  {
-    authMode: 'app-secret',
-    color: '#00D6B9',
-    description: 'channel.lark.description',
-    docsLink:
-      'https://open.larksuite.com/document/home/introduction-to-custom-app-development/self-built-application-development-process',
-    fieldTags: {
-      appId: 'App ID',
-      appSecret: 'App Secret',
-      encryptKey: 'Encrypt Key',
-      verificationToken: 'Verification Token',
-      webhook: 'Event Subscription URL',
-    },
-    icon: Lark,
-    id: 'lark',
-    name: 'Lark',
-  },
-  {
-    authMode: 'app-secret',
-    color: '#12B7F5',
-    description: 'channel.qq.description',
-    docsLink: 'https://bot.q.qq.com/wiki/',
-    fieldTags: {
-      appId: 'App ID',
-      appSecret: 'App Secret',
-      webhook: 'Callback URL',
-    },
-    icon: QQ,
-    id: 'qq',
-    name: 'QQ',
-    webhookMode: 'manual',
+    comingSoon: true,
+    connectionMode: 'webhook',
+    id: 'imessage',
+    name: 'iMessage',
+    schema: [],
   },
 ];

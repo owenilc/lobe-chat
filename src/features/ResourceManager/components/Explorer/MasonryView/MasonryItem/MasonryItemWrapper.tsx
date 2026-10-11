@@ -1,5 +1,6 @@
 import { memo } from 'react';
 
+import { isExplorerItemSelected } from '@/features/ResourceManager/store/selectors';
 import { type FileListItem } from '@/types/files';
 
 import MasonryFileItem from '.';
@@ -7,8 +8,10 @@ import MasonryFileItem from '.';
 interface MasonryItemWrapperProps {
   context: {
     knowledgeBaseId?: string;
+    isItemSelectable: (item: FileListItem) => boolean;
+    onSelectedChange: (id: string, checked: boolean) => void;
+    selectAllState: 'all' | 'loaded' | 'none';
     selectFileIds: string[];
-    setSelectedFileIds: (ids: string[]) => void;
   };
   data: FileListItem;
   index: number;
@@ -20,18 +23,22 @@ const MasonryItemWrapper = memo<MasonryItemWrapperProps>(({ data: item, context 
     return null;
   }
 
+  const selectable = context.isItemSelectable(item);
+
   return (
     <div style={{ padding: '8px 4px' }}>
       <MasonryFileItem
         knowledgeBaseId={context.knowledgeBaseId}
-        selected={context.selectFileIds.includes(item.id)}
-        onSelectedChange={(id, checked) => {
-          if (checked) {
-            context.setSelectedFileIds([...context.selectFileIds, id]);
-          } else {
-            context.setSelectedFileIds(context.selectFileIds.filter((item) => item !== id));
-          }
-        }}
+        selectable={selectable}
+        selected={
+          selectable &&
+          isExplorerItemSelected({
+            id: item.id,
+            selectAllState: context.selectAllState,
+            selectedIds: context.selectFileIds,
+          })
+        }
+        onSelectedChange={context.onSelectedChange}
         {...item}
       />
     </div>

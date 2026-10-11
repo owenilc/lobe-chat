@@ -1,5 +1,10 @@
+import { CLI_API_KEY_ENV } from '../constants/auth';
+import { CLI_PRIMARY_BIN } from '../constants/identity';
+import { resolveServerUrl } from '../settings';
 import { log } from '../utils/logger';
-import { getValidToken } from './refresh';
+import { getUserIdFromApiKey } from './apiKey';
+import { describeTokenLookup, getValidToken } from './refresh';
+import { pickAuthSource } from './source';
 
 interface ResolveTokenOptions {
   serviceToken?: string;
@@ -8,14 +13,16 @@ interface ResolveTokenOptions {
 }
 
 interface ResolvedAuth {
+  serverUrl: string;
   token: string;
+  tokenType: 'apiKey' | 'jwt' | 'serviceToken';
   userId: string;
 }
 
 /**
  * Parse the `sub` claim from a JWT without verifying the signature.
  */
-function parseJwtSub(token: string): string | undefined {
+export function parseJwtSub(token: string): string | undefined {
   try {
     const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString());
     return payload.sub;
@@ -25,53 +32,85 @@ function parseJwtSub(token: string): string | undefined {
 }
 
 /**
- * Resolve an access token from explicit options or stored credentials.
+ * Resolve an access token from explicit options, environment variables, or stored credentials.
  * Exits the process if no token can be resolved.
+ *
+ * The precedence itself lives in `pickAuthSource` so `lh doctor` can report the
+ * winning credential without logging in as it.
  */
 export async function resolveToken(options: ResolveTokenOptions): Promise<ResolvedAuth> {
-  // LOBEHUB_JWT env var takes highest priority (used by server-side sandbox execution)
-  const envJwt = process.env.LOBEHUB_JWT;
-  if (envJwt) {
-    const userId = parseJwtSub(envJwt);
-    if (!userId) {
-      log.error('Could not extract userId from LOBEHUB_JWT.');
-      process.exit(1);
+  const source = pickAuthSource(options);
+
+  switch (source.kind) {
+    // Used by server-side sandbox execution.
+    case 'env-jwt': {
+      const serverUrl = resolveServerUrl();
+      const userId = parseJwtSub(source.token!);
+      if (!userId) {
+        log.error('Could not extract userId from LOBEHUB_JWT.');
+        process.exit(1);
+      }
+      log.debug('Using LOBEHUB_JWT from environment');
+      return { serverUrl, token: source.token!, tokenType: 'jwt', userId };
     }
-    log.debug('Using LOBEHUB_JWT from environment');
-    return { token: envJwt, userId };
+
+    case 'option-token': {
+      const userId = parseJwtSub(source.token!);
+      if (!userId) {
+        log.error('Could not extract userId from token. Provide --user-id explicitly.');
+        process.exit(1);
+      }
+      return { serverUrl: resolveServerUrl(), token: source.token!, tokenType: 'jwt', userId };
+    }
+
+    case 'option-service-token': {
+      if (!options.userId) {
+        log.error('--user-id is required when using --service-token');
+        process.exit(1);
+      }
+      return {
+        serverUrl: resolveServerUrl(),
+        token: source.token!,
+        tokenType: 'serviceToken',
+        userId: options.userId!,
+      };
+    }
+
+    case 'env-api-key': {
+      try {
+        const serverUrl = resolveServerUrl();
+        const userId = await getUserIdFromApiKey(source.token!, serverUrl);
+        log.debug(`Using ${source.origin} from environment`);
+        return { serverUrl, token: source.token!, tokenType: 'apiKey', userId };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        log.error(`Failed to validate ${source.origin}: ${message}`);
+        process.exit(1);
+      }
+    }
   }
 
-  // Explicit token takes priority
-  if (options.token) {
-    const userId = parseJwtSub(options.token);
-    if (!userId) {
-      log.error('Could not extract userId from token. Provide --user-id explicitly.');
-      process.exit(1);
-    }
-    return { token: options.token, userId };
-  }
-
-  if (options.serviceToken) {
-    if (!options.userId) {
-      log.error('--user-id is required when using --service-token');
-      process.exit(1);
-    }
-    return { token: options.serviceToken, userId: options.userId };
-  }
-
-  // Try stored credentials
+  // Stored credentials, refreshed when the access token is close to expiry.
   const result = await getValidToken();
-  if (result) {
+  if (result.status === 'ok') {
     log.debug('Using stored credentials');
-    const token = result.credentials.accessToken;
-    const userId = parseJwtSub(token);
+    const { credentials } = result;
+    const serverUrl = resolveServerUrl();
+
+    const userId = parseJwtSub(credentials.accessToken);
     if (!userId) {
-      log.error("Stored token is invalid. Run 'lh login' again.");
+      log.error(`Stored token is invalid. Run '${CLI_PRIMARY_BIN} login' again.`);
       process.exit(1);
     }
-    return { token, userId };
+
+    return { serverUrl, token: credentials.accessToken, tokenType: 'jwt', userId };
   }
 
-  log.error("No authentication found. Run 'lh login' first, or provide --token.");
+  const report = describeTokenLookup(result);
+  log.error(
+    report
+      ? `${report.detail} ${report.fix}`
+      : `No authentication found. Run '${CLI_PRIMARY_BIN} login' first, or set ${CLI_API_KEY_ENV}, or provide --token.`,
+  );
   process.exit(1);
 }

@@ -1,4 +1,6 @@
-import { Button, Flexbox, stopPropagation, Tooltip } from '@lobehub/ui';
+import { CUSTOM_FOLDER_FILE_TYPE } from '@lobechat/const';
+import { Flexbox, stopPropagation, Tooltip } from '@lobehub/ui';
+import { Button } from '@lobehub/ui/base-ui';
 import { createStaticStyles, cx } from 'antd-style';
 import { isNull } from 'es-toolkit/compat';
 import { FileBoxIcon, Folder } from 'lucide-react';
@@ -6,10 +8,10 @@ import { memo } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import FileIcon from '@/components/FileIcon';
+import { isChunkingSupported } from '@/libs/document-loaders/loaderType';
 import { fileManagerSelectors, useFileStore } from '@/store/file';
 import { type AsyncTaskStatus, type IAsyncTaskError } from '@/types/asyncTask';
 import { formatSize } from '@/utils/format';
-import { isChunkingUnsupported } from '@/utils/isChunkingUnsupported';
 
 import ChunksBadge from '../../ListView/ListItem/ChunkTag';
 
@@ -74,8 +76,8 @@ const DefaultFileItem = memo<DefaultFileItemProps>(
       s.parseFilesToChunks,
     ]);
 
-    const isFolder = fileType === 'custom/folder';
-    const isSupportedForChunking = !isChunkingUnsupported(fileType || '');
+    const isFolder = fileType === CUSTOM_FOLDER_FILE_TYPE;
+    const isSupportedForChunking = isChunkingSupported({ fileType, name });
 
     return (
       <>

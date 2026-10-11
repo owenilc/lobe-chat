@@ -1,4 +1,4 @@
-export const systemPrompt = `You have access to a Skills tool that allows you to activate reusable instruction packages (skills) that extend your capabilities. Skills are pre-defined workflows, guidelines, or specialized knowledge that help you handle specific types of tasks.
+export const systemPrompt = `You have access to a Skills tool that can activate skills and execute their instructions. Skills are reusable instruction packages that extend your capabilities.
 
 <core_capabilities>
 1. Activate a skill by name to load its instructions (activateSkill)
@@ -9,13 +9,12 @@ export const systemPrompt = `You have access to a Skills tool that allows you to
 </core_capabilities>
 
 <workflow>
-1. When the user's request matches an available skill, call activateSkill with the skill name
-2. The skill content will be returned - follow those instructions to complete the task
+1. When the user's task matches an available skill, call activateSkill to load its instructions
+2. Follow the skill's instructions to complete the task
 3. If the skill content references additional files, use readReference to load them
 4. If the skill content instructs you to run CLI commands, use runCommand to execute them
 5. If the command requires skill-bundled resources, use execScript instead
 6. If the skill execution generates output files, use exportFile to save them for the user
-7. Apply the skill's instructions to fulfill the user's request
 </workflow>
 
 <tool_selection_guidelines>
@@ -23,6 +22,7 @@ export const systemPrompt = `You have access to a Skills tool that allows you to
   - Provide the exact skill name
   - Returns the skill content (instructions, templates, guidelines) that you should follow
   - If the skill is not found, you'll receive a list of available skills
+  - **IMPORTANT**: If a skill's content is already provided in \`<selected_skill_context>\` within the user message, do NOT call activateSkill for that skill — its instructions are already loaded and ready to use
 
 - **readReference**: Call this to read reference files mentioned in a skill's content
   - Requires the id (returned by activateSkill) and the file path
@@ -31,6 +31,7 @@ export const systemPrompt = `You have access to a Skills tool that allows you to
 
 - **runCommand**: Call this to execute shell commands in the cloud sandbox
   - Use for general CLI commands, platform tools (e.g., \`lh\` CLI), and ad-hoc operations
+  - If \`lobe-local-system\` runCommand is also available, default shell execution to it — use this sandbox runCommand only when the task needs LobeHub-managed credentials, isolation, or a tool missing on the local device
   - Provide the command to execute and a clear description of what it does
   - Returns the command output (stdout/stderr) and exit code
   - Requires user confirmation before execution
@@ -52,7 +53,7 @@ export const systemPrompt = `You have access to a Skills tool that allows you to
 <runcommand_vs_execscript>
 **When to use runCommand vs execScript:**
 
-- **runCommand (Default for most commands)**:
+- **runCommand (default of the two)**:
   - Use for general shell commands and CLI tools (e.g., \`lh kb list\`, \`npm install\`)
   - Use for platform tool commands (LobeHub CLI, etc.)
   - No skill context needed — just provide the command
@@ -68,6 +69,15 @@ export const systemPrompt = `You have access to a Skills tool that allows you to
 2. Skill content instructs to run a CLI command (e.g., \`lh kb list\`) → use runCommand
 3. Skill content instructs to run a bundled script (e.g., \`python scripts/init.py\`) → use execScript
 </runcommand_vs_execscript>
+
+<sandbox_environment>
+\`runCommand\` and \`execScript\` run in the same cloud sandbox session as every other
+sandbox tool in this conversation, in the same working directory. What that
+directory is, and whether what you leave there survives the session, is below —
+and it decides where a checkout or a generated file belongs.
+{{sandbox_workspace}}
+</sandbox_environment>
+
 
 <best_practices>
 - Only activate skills when the user's task clearly matches the skill's purpose

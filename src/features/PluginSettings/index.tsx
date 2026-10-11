@@ -1,6 +1,6 @@
-import { type PluginSchema } from '@lobehub/chat-plugin-sdk';
-import { Form, Markdown } from '@lobehub/ui';
-import { Form as AForm } from 'antd';
+import { type ToolManifestSettings } from '@lobechat/types';
+import { Markdown } from '@lobehub/ui';
+import { Form, useForm } from '@lobehub/ui/base-ui/form';
 import { createStaticStyles } from 'antd-style';
 import isEqual from 'fast-deep-equal';
 import { memo } from 'react';
@@ -10,7 +10,7 @@ import { pluginSelectors } from '@/store/tool/selectors';
 
 import ItemRender from '../../components/JSONSchemaConfig/ItemRender';
 
-export const transformPluginSettings = (pluginSettings: PluginSchema) => {
+export const transformPluginSettings = (pluginSettings: ToolManifestSettings) => {
   if (!pluginSettings?.properties) return [];
 
   return Object.entries(pluginSettings.properties).map(([name, i]) => ({
@@ -28,7 +28,7 @@ export const transformPluginSettings = (pluginSettings: PluginSchema) => {
 
 interface PluginSettingsConfigProps {
   id: string;
-  schema: PluginSchema;
+  schema: ToolManifestSettings;
 }
 
 const styles = createStaticStyles(({ css, cssVar }) => ({
@@ -43,7 +43,12 @@ const PluginSettingsConfig = memo<PluginSettingsConfigProps>(({ schema, id }) =>
   const [updatePluginSettings] = useToolStore((s) => [s.updatePluginSettings]);
   const pluginSetting = useToolStore(pluginSelectors.getPluginSettingsById(id), isEqual);
 
-  const [form] = AForm.useForm();
+  const form = useForm({
+    initialValues: pluginSetting,
+    onSubmit: async (v) => {
+      await updatePluginSettings(id, v);
+    },
+  });
 
   const items = transformPluginSettings(schema);
 
@@ -52,7 +57,6 @@ const PluginSettingsConfig = memo<PluginSettingsConfigProps>(({ schema, id }) =>
       footer={<Form.SubmitFooter />}
       form={form}
       gap={16}
-      initialValues={pluginSetting}
       itemsType={'flat'}
       layout={'vertical'}
       variant={'borderless'}
@@ -71,15 +75,10 @@ const PluginSettingsConfig = memo<PluginSettingsConfigProps>(({ schema, id }) =>
             {item.desc as string}
           </Markdown>
         ),
-        key: item.label,
         label: item.label,
         name: item.name,
         tag: item.tag,
-        valuePropName: item.type === 'boolean' ? 'checked' : undefined,
       }))}
-      onFinish={async (v) => {
-        await updatePluginSettings(id, v);
-      }}
     />
   );
 });

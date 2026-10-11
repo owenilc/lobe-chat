@@ -1,37 +1,96 @@
 'use client';
 
 import { isDesktop } from '@lobechat/const';
-import { type IEditor } from '@lobehub/editor';
+import type { IEditor } from '@lobehub/editor';
 import {
   ReactImagePlugin,
   ReactLinkPlugin,
   ReactLiteXmlPlugin,
+  ReactMathPlugin,
+  ReactMentionPlugin,
   ReactTablePlugin,
   ReactToolbarPlugin,
 } from '@lobehub/editor';
 import { Editor, useEditorState } from '@lobehub/editor/react';
+import { createStaticStyles } from 'antd-style';
 import isEqual from 'fast-deep-equal';
-import { memo, type RefObject, useCallback, useEffect, useMemo, useRef } from 'react';
+import type { CSSProperties, RefObject } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { createChatInputRichPlugins } from '@/features/ChatInput/InputEditor/plugins';
+import { writeTopicCommentMentionMarkdown } from '@/features/Portal/TopicComments/editorUtils';
 
 import { type EditorCanvasProps } from './EditorCanvas';
 import InlineToolbar from './InlineToolbar';
-import { useImageUpload } from './useImageUpload';
+import LinearFilePlugin from './LinearFilePlugin';
+import { registerAttachmentClickOpen } from './registerAttachmentClickOpen';
+import { registerBlockDecoratorCaretGuard } from './registerBlockDecoratorCaretGuard';
+import { needsImageRehost, rehostImage } from './rehostImage';
+import { useFileUpload, useImageUpload } from './useImageUpload';
 
 const IMAGE_FILTERS = [
   { extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'avif'], name: 'Images' },
 ];
+
+// Force the Lexical FileNode's outer `<span>` to render as its own block-
+// level row inside the paragraph. The inner card visuals (icon + name + size
+// + download button) live in `LinearFilePlugin`.
+const fileNodeStyles = createStaticStyles(({ css }) => ({
+  fileWrapper: css`
+    display: block !important;
+    width: 100% !important;
+    margin-block: 8px !important;
+  `,
+}));
 
 /**
  * Base plugins for the editor (without image and toolbar, which need dynamic config)
  */
 const STATIC_PLUGINS = [
   ReactLiteXmlPlugin,
-  ...createChatInputRichPlugins({ linkPlugin: ReactLinkPlugin }),
+  ...createChatInputRichPlugins({ linkPlugin: ReactLinkPlugin, mathPlugin: false }),
+  // The kernel reads a plugin's config once at init, and `mentionOption` can
+  // arrive later (workspace pages resolve their member source asynchronously),
+  // so pin the member chip's markdown form here rather than relying on
+  // `mentionOption.markdownWriter` being present at mount. Same writer as the
+  // comment editors, so a chip serialises identically in every canvas.
+  Editor.withProps(ReactMentionPlugin, { markdownWriter: writeTopicCommentMentionMarkdown }),
   ReactTablePlugin,
 ];
+
+const EDITOR_INIT_DATA_SOURCE_TYPES = ['json', 'markdown'] as const;
+const EDITOR_INIT_RETRY_LIMIT = 30;
+const EDITOR_INIT_RETRY_INTERVAL = 16;
+
+interface InspectableEditor extends IEditor {
+  dataTypeMap?: Map<string, unknown> | Record<string, unknown>;
+}
+
+const getEditorDataSourceTypes = (editor: InspectableEditor): string[] => {
+  const dataTypeMap = editor.dataTypeMap;
+
+  if (!dataTypeMap) return [];
+
+  if (dataTypeMap instanceof Map) {
+    return [...dataTypeMap.keys()].sort();
+  }
+
+  return Object.keys(dataTypeMap).sort();
+};
+
+const isEditorInitReady = (editor: IEditor) => {
+  const inspectableEditor = editor as InspectableEditor;
+  const dataSourceTypes = getEditorDataSourceTypes(inspectableEditor);
+
+  return {
+    dataSourceTypes,
+    hasLexicalEditor: !!editor.getLexicalEditor?.(),
+    isReady:
+      !!editor.getLexicalEditor?.() &&
+      EDITOR_INIT_DATA_SOURCE_TYPES.every((type) => dataSourceTypes.includes(type)),
+  };
+};
 
 export interface InternalEditorProps extends EditorCanvasProps {
   /**
@@ -50,14 +109,25 @@ export interface InternalEditorProps extends EditorCanvasProps {
  */
 const InternalEditor = memo<InternalEditorProps>(
   ({
+    allowContentBleed,
+    blockImageCaretGuard = false,
+    className,
     contentChangeLockRef,
+    contentStyle,
+    disabled,
+    editable = true,
     editor,
+    enableInlineMath = true,
     extraPlugins,
     floatingToolbar = true,
+    getPopupContainer,
+    mentionOption,
     onContentChange,
     onInit,
+    onPressEnter,
     placeholder,
     plugins: customPlugins,
+    readonlySelectionItems,
     slashItems,
     style,
     toolbarExtraItems,
@@ -65,6 +135,7 @@ const InternalEditor = memo<InternalEditorProps>(
     const { t } = useTranslation('file');
     const editorState = useEditorState(editor);
     const handleImageUpload = useImageUpload();
+    const handleFileUpload = useFileUpload();
 
     const handlePickFile = useCallback(async (): Promise<File | null> => {
       if (!isDesktop) return null;
@@ -79,6 +150,18 @@ const InternalEditor = memo<InternalEditorProps>(
     }, []);
 
     const finalPlaceholder = placeholder || t('pageEditor.editorPlaceholder');
+    const wrapperStyle = useMemo<CSSProperties>(
+      () => ({
+        cursor: disabled ? 'not-allowed' : undefined,
+        maxWidth: '100%',
+        minWidth: 0,
+        opacity: disabled ? 0.65 : undefined,
+        overflow: allowContentBleed ? 'visible' : 'hidden',
+        pointerEvents: disabled ? 'none' : undefined,
+        width: '100%',
+      }),
+      [allowContentBleed, disabled],
+    );
 
     // Build plugins array
     const plugins = useMemo(() => {
@@ -87,17 +170,31 @@ const InternalEditor = memo<InternalEditorProps>(
 
       const imagePlugin = Editor.withProps(ReactImagePlugin, {
         defaultBlockImage: true,
+        handleRehost: rehostImage,
         handleUpload: handleImageUpload,
+        needRehost: (url: string) =>
+          !!editor.getLexicalEditor?.()?.isEditable() && needsImageRehost(url),
         onPickFile: isDesktop ? handlePickFile : undefined,
       });
 
+      const filePlugin = Editor.withProps(LinearFilePlugin, {
+        handleUpload: handleFileUpload,
+        theme: { file: fileNodeStyles.fileWrapper as unknown as string },
+      });
+
+      const mathPlugin = Editor.withProps(ReactMathPlugin, { enableInlineMath });
+
       // Build base plugins with optional extra plugins prepended
       const basePlugins = extraPlugins
-        ? [...extraPlugins, ...STATIC_PLUGINS, imagePlugin]
-        : [...STATIC_PLUGINS, imagePlugin];
+        ? [...extraPlugins, ...STATIC_PLUGINS, mathPlugin, imagePlugin, filePlugin]
+        : [...STATIC_PLUGINS, mathPlugin, imagePlugin, filePlugin];
 
-      // Add toolbar if enabled
-      if (floatingToolbar) {
+      if (!floatingToolbar || disabled) return basePlugins;
+
+      // The formatting toolbar only when the editor is actually editable — a
+      // locked / read-only page must not surface it on text selection (its
+      // buttons would dispatch commands that never save).
+      if (editable) {
         return [
           ...basePlugins,
           Editor.withProps(ReactToolbarPlugin, {
@@ -113,15 +210,40 @@ const InternalEditor = memo<InternalEditorProps>(
         ];
       }
 
+      // A read-only body can still be selected; selection-scoped actions that
+      // never edit (comment on it, ask about it) stay reachable through a
+      // toolbar that carries nothing else.
+      if (readonlySelectionItems?.length) {
+        return [
+          ...basePlugins,
+          Editor.withProps(ReactToolbarPlugin, {
+            children: (
+              <InlineToolbar
+                floating
+                selectionOnly
+                editor={editor}
+                editorState={editorState}
+                extraItems={readonlySelectionItems}
+              />
+            ),
+          }),
+        ];
+      }
+
       return basePlugins;
     }, [
       customPlugins,
+      disabled,
+      editable,
       editor,
       editorState,
+      enableInlineMath,
       extraPlugins,
       floatingToolbar,
+      handleFileUpload,
       handleImageUpload,
       handlePickFile,
+      readonlySelectionItems,
       toolbarExtraItems,
     ]);
 
@@ -133,6 +255,69 @@ const InternalEditor = memo<InternalEditorProps>(
         window.__editor = undefined;
       };
     }, [editor]);
+
+    // Open file attachments in a new tab on click (PDFs preview natively).
+    // Workaround for @lobehub/editor's ReactFile decorator not exposing a
+    // download / preview affordance.
+    useEffect(() => {
+      if (!editor) return;
+      const unregister = registerAttachmentClickOpen(editor);
+      return () => unregister?.();
+    }, [editor]);
+
+    // Opt-in (comment editors): keep the caret out of the root node around
+    // block images by pushing an empty paragraph next to the image instead of
+    // showing Lexical's horizontal root-level caret.
+    useEffect(() => {
+      if (!editor || !blockImageCaretGuard) return;
+      const unregister = registerBlockDecoratorCaretGuard(editor);
+      return () => unregister?.();
+    }, [blockImageCaretGuard, editor]);
+
+    const onInitRef = useRef(onInit);
+    const initializedEditorRef = useRef<IEditor | null>(null);
+
+    useEffect(() => {
+      onInitRef.current = onInit;
+    }, [onInit]);
+
+    useEffect(() => {
+      if (!onInit) return;
+
+      let retryCount = 0;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let disposed = false;
+
+      const notifyWhenReady = () => {
+        if (disposed) return;
+
+        const snapshot = isEditorInitReady(editor);
+
+        if (snapshot.isReady) {
+          if (initializedEditorRef.current !== editor) {
+            initializedEditorRef.current = editor;
+            onInitRef.current?.(editor);
+          }
+
+          return;
+        }
+
+        if (retryCount >= EDITOR_INIT_RETRY_LIMIT) {
+          console.warn('[InternalEditor] onInit delayed because editor is not ready:', snapshot);
+          return;
+        }
+
+        retryCount += 1;
+        timer = setTimeout(notifyWhenReady, EDITOR_INIT_RETRY_INTERVAL);
+      };
+
+      notifyWhenReady();
+
+      return () => {
+        disposed = true;
+        if (timer) clearTimeout(timer);
+      };
+    }, [editor, onInit]);
 
     // Use refs for stable references across re-renders
     const previousDocumentSnapshotRef = useRef<unknown>(undefined);
@@ -162,6 +347,7 @@ const InternalEditor = memo<InternalEditorProps>(
           // During document hydration (e.g. route switch), we only advance snapshot
           // and skip external change callback to avoid false dirty checks.
           if (contentChangeLockRef?.current) return;
+          if (disabled) return;
 
           onContentChangeRef.current?.();
         }
@@ -170,10 +356,12 @@ const InternalEditor = memo<InternalEditorProps>(
       return () => {
         unregister();
       };
-    }, [contentChangeLockRef, editor]); // Only depend on stable refs and editor
+    }, [contentChangeLockRef, disabled, editor]); // Only depend on stable refs and editor
 
     return (
       <div
+        className={className}
+        style={wrapperStyle}
         onClick={(e) => {
           e.stopPropagation();
           e.preventDefault();
@@ -181,17 +369,20 @@ const InternalEditor = memo<InternalEditorProps>(
       >
         <Editor
           content={''}
+          editable={editable && !disabled}
           editor={editor}
-          lineEmptyPlaceholder={finalPlaceholder}
+          getPopupContainer={getPopupContainer}
+          mentionOption={mentionOption}
           placeholder={finalPlaceholder}
           plugins={plugins}
           slashOption={slashItems ? { items: slashItems } : undefined}
           type={'text'}
           style={{
-            paddingBottom: 64,
+            paddingBottom: 32,
             ...style,
+            ...contentStyle,
           }}
-          onInit={onInit}
+          {...(onPressEnter ? { onPressEnter } : {})}
         />
       </div>
     );

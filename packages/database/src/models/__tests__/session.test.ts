@@ -25,19 +25,19 @@ const sessionModel = new SessionModel(serverDB, userId);
 
 beforeEach(async () => {
   await serverDB.delete(users);
-  // 并创建初始用户
+  // and create the initial user
   await serverDB.insert(users).values({ id: userId });
 });
 
 afterEach(async () => {
-  // 在每个测试用例之后, 清空用户表 (应该会自动级联删除所有数据)
+  // After each test case, clear the users table (should auto-cascade delete all data)
   await serverDB.delete(users);
 });
 
 describe('SessionModel', () => {
   describe('query', () => {
     it('should query sessions by user ID', async () => {
-      // 创建一些测试数据
+      // Create some test data
       await serverDB.insert(users).values([{ id: '456' }]);
 
       await serverDB.insert(sessions).values([
@@ -46,10 +46,10 @@ describe('SessionModel', () => {
         { id: '3', userId: '456', updatedAt: new Date('2023-03-01') },
       ]);
 
-      // 调用 query 方法
+      // Call the query method
       const result = await sessionModel.query();
 
-      // 断言结果
+      // Assert results
       expect(result).toHaveLength(2);
       expect(result[0].id).toBe('2');
       expect(result[1].id).toBe('1');
@@ -76,7 +76,7 @@ describe('SessionModel', () => {
 
   describe('queryWithGroups', () => {
     it('should return sessions grouped by group', async () => {
-      // 创建测试数据
+      // Create test data
       await serverDB.transaction(async (trx) => {
         await trx.insert(users).values([{ id: '456' }]);
         await trx.insert(sessionGroups).values([
@@ -94,10 +94,10 @@ describe('SessionModel', () => {
         ]);
       });
 
-      // 调用 queryWithGroups 方法
+      // Call the queryWithGroups method
       const result = await sessionModel.queryWithGroups();
 
-      // 断言结果
+      // Assert results
       expect(result.sessions).toHaveLength(6);
       expect(result.sessionGroups).toHaveLength(2);
       expect(result.sessionGroups[0].id).toBe('group1');
@@ -107,10 +107,10 @@ describe('SessionModel', () => {
     });
 
     it('should return empty groups if no sessions', async () => {
-      // 调用 queryWithGroups 方法
+      // Call the queryWithGroups method
       const result = await sessionModel.queryWithGroups();
 
-      // 断言结果
+      // Assert results
       expect(result.sessions).toHaveLength(0);
       expect(result.sessionGroups).toHaveLength(0);
     });
@@ -236,7 +236,7 @@ describe('SessionModel', () => {
 
   describe('count', () => {
     it('should return the count of sessions for the user', async () => {
-      // 创建测试数据
+      // Create test data
       await serverDB.insert(users).values([{ id: '456' }]);
       await serverDB.insert(sessions).values([
         { id: '1', userId },
@@ -244,22 +244,22 @@ describe('SessionModel', () => {
         { id: '3', userId: '456' },
       ]);
 
-      // 调用 count 方法
+      // Call the count method
       const result = await sessionModel.count();
 
-      // 断言结果
+      // Assert results
       expect(result).toBe(2);
     });
 
     it('should return 0 if no sessions exist for the user', async () => {
-      // 创建测试数据
+      // Create test data
       await serverDB.insert(users).values([{ id: '456' }]);
       await serverDB.insert(sessions).values([{ id: '3', userId: '456' }]);
 
-      // 调用 count 方法
+      // Call the count method
       const result = await sessionModel.count();
 
-      // 断言结果
+      // Assert results
       expect(result).toBe(0);
     });
 
@@ -283,7 +283,9 @@ describe('SessionModel', () => {
     });
   });
 
-  describe('queryByKeyword', () => {
+  // BM25 search requires pg_search extension (ParadeDB), not available in PGlite
+  const isServerDB = process.env.TEST_SERVER_DB === '1';
+  describe.skipIf(!isServerDB)('queryByKeyword', () => {
     it('should return an empty array if keyword is empty', async () => {
       const result = await sessionModel.queryByKeyword('');
       expect(result).toEqual([]);
@@ -364,9 +366,83 @@ describe('SessionModel', () => {
     });
   });
 
+  describe('queryByKeyword with external candidates', () => {
+    it('hydrates only current-scope sessions and surfaces candidate failures', async () => {
+      await serverDB.insert(users).values({ id: 'candidate-other-user' });
+      await serverDB.insert(sessions).values([
+        { id: 'candidate-session-own-a', userId },
+        { id: 'candidate-session-own-a-secondary', userId },
+        { id: 'candidate-session-own-b', userId },
+        { id: 'candidate-session-other', userId: 'candidate-other-user' },
+      ]);
+      await serverDB.insert(agents).values([
+        { id: 'candidate-agent-own-a', title: 'Own A', userId },
+        { id: 'candidate-agent-own-b', title: 'Own B', userId },
+        { id: 'candidate-agent-own-unlinked', title: 'Own Unlinked', userId },
+        { id: 'candidate-agent-other', title: 'Other', userId: 'candidate-other-user' },
+      ]);
+      await serverDB.insert(agentsToSessions).values([
+        { agentId: 'candidate-agent-own-a', sessionId: 'candidate-session-own-a', userId },
+        {
+          agentId: 'candidate-agent-own-a',
+          sessionId: 'candidate-session-own-a-secondary',
+          userId,
+        },
+        { agentId: 'candidate-agent-own-b', sessionId: 'candidate-session-own-b', userId },
+        {
+          agentId: 'candidate-agent-other',
+          sessionId: 'candidate-session-other',
+          userId: 'candidate-other-user',
+        },
+      ]);
+      const ftsSearchCandidates = vi.fn().mockResolvedValue({
+        candidates: [
+          { id: 'candidate-agent-other', score: 10 },
+          { id: 'candidate-agent-deleted', score: 9 },
+          { id: 'candidate-agent-own-b', score: 8 },
+          { id: 'candidate-agent-own-unlinked', score: 7 },
+          { id: 'candidate-agent-own-a', score: 6 },
+        ],
+        total: 5,
+      });
+      const model = new SessionModel(serverDB, userId, undefined, {
+        ftsSearchCandidateEnabled: true,
+        ftsSearchCandidates,
+      });
+
+      const result = await model.queryByKeyword('candidate');
+      expect(result).toHaveLength(2);
+      expect(['candidate-session-own-a', 'candidate-session-own-a-secondary']).toContain(
+        result[0]?.id,
+      );
+      expect(result[1]?.id).toBe('candidate-session-own-b');
+      await expect(
+        model.findSessionsByKeywords({ current: 0, keyword: 'candidate', pageSize: 1 }),
+      ).resolves.toMatchObject([
+        { id: expect.stringMatching(/^candidate-session-own-a(?:-secondary)?$/) },
+      ]);
+      await expect(
+        model.findSessionsByKeywords({ current: 1, keyword: 'candidate', pageSize: 1 }),
+      ).resolves.toMatchObject([{ id: 'candidate-session-own-b' }]);
+      await expect(
+        model.findSessionsByKeywords({ current: 2, keyword: 'candidate', pageSize: 1 }),
+      ).resolves.toEqual([]);
+      expect(ftsSearchCandidates).toHaveBeenCalledWith({
+        entity: 'agents',
+        filters: {},
+        pagination: {},
+        query: { fields: ['title', 'description'], text: 'candidate' },
+      });
+
+      const providerError = new Error('candidate unavailable');
+      ftsSearchCandidates.mockRejectedValueOnce(providerError);
+      await expect(model.queryByKeyword('failure')).rejects.toBe(providerError);
+    });
+  });
+
   describe('create', () => {
     it('should create a new session', async () => {
-      // 调用 create 方法
+      // Call the create method
       const result = await sessionModel.create({
         type: 'agent',
         session: {
@@ -375,7 +451,7 @@ describe('SessionModel', () => {
         config: { model: 'gpt-3.5-turbo' },
       });
 
-      // 断言结果
+      // Assert results
       const sessionId = result.id;
       expect(sessionId).toBeDefined();
       expect(sessionId.startsWith('ssn_')).toBeTruthy();
@@ -390,7 +466,7 @@ describe('SessionModel', () => {
     });
 
     it('should create a new session with custom ID', async () => {
-      // 调用 create 方法,传入自定义 ID
+      // Call the create method with a custom ID
       const customId = 'custom-id';
       const result = await sessionModel.create({
         type: 'agent',
@@ -399,7 +475,7 @@ describe('SessionModel', () => {
         id: customId,
       });
 
-      // 断言结果
+      // Assert results
       expect(result.id).toBe(customId);
     });
 
@@ -471,7 +547,7 @@ describe('SessionModel', () => {
 
   describe('batchCreate', () => {
     it('should batch create sessions', async () => {
-      // 调用 batchCreate 方法
+      // Call the batchCreate method
       const sessions: NewSession[] = [
         {
           id: '1',
@@ -490,13 +566,13 @@ describe('SessionModel', () => {
       ];
       const result = await sessionModel.batchCreate(sessions);
 
-      // 断言结果
+      // Assert results
       // pglite return affectedRows while postgres return rowCount
       expect((result as any).affectedRows || result.rowCount).toEqual(2);
     });
 
     it.skip('should set group to default if group does not exist', async () => {
-      // 调用 batchCreate 方法,传入不存在的 group
+      // Call the batchCreate method with a non-existent group
       const sessions: NewSession[] = [
         {
           id: '1',
@@ -507,16 +583,16 @@ describe('SessionModel', () => {
           groupId: 'non-existent-group',
         },
       ];
-      const result = await sessionModel.batchCreate(sessions);
+      await sessionModel.batchCreate(sessions);
 
-      // 断言结果
+      // Assert results
       // expect(result[0].group).toBe('default');
     });
   });
 
   describe('duplicate', () => {
     it('should duplicate a session', async () => {
-      // 创建一个用户和一个 session
+      // Create a user and a session
       await serverDB.transaction(async (trx) => {
         await trx
           .insert(sessions)
@@ -525,10 +601,10 @@ describe('SessionModel', () => {
         await trx.insert(agentsToSessions).values({ agentId: 'agent-1', sessionId: '1', userId });
       });
 
-      // 调用 duplicate 方法
+      // Call the duplicate method
       const result = (await sessionModel.duplicate('1', 'Duplicated Session')) as SessionItem;
 
-      // 断言结果
+      // Assert results
       expect(result.id).not.toBe('1');
       expect(result.userId).toBe(userId);
       expect(result.type).toBe('agent');
@@ -542,34 +618,34 @@ describe('SessionModel', () => {
     });
 
     it('should return undefined if session does not exist', async () => {
-      // 调用 duplicate 方法,传入不存在的 session ID
+      // Call the duplicate method with a non-existent session ID
       const result = await sessionModel.duplicate('non-existent-id');
 
-      // 断言结果
+      // Assert results
       expect(result).toBeUndefined();
     });
   });
 
   describe('update', () => {
     it('should update a session', async () => {
-      // 创建一个测试 session
+      // Create a test session
       const sessionId = '123';
       await serverDB.insert(sessions).values({ userId, id: sessionId, title: 'Test Session' });
 
-      // 调用 update 方法更新 session
+      // Call the update method to update the session
       const updatedSessions = await sessionModel.update(sessionId, {
         title: 'Updated Test Session',
         description: 'This is an updated test session',
       });
 
-      // 断言更新后的结果
+      // Assert the updated results
       expect(updatedSessions).toHaveLength(1);
       expect(updatedSessions[0].title).toBe('Updated Test Session');
       expect(updatedSessions[0].description).toBe('This is an updated test session');
     });
 
     it('should not update a session if user ID does not match', async () => {
-      // 创建一个测试 session,但使用不同的 user ID
+      // Create a test session with a different user ID
       await serverDB.insert(users).values([{ id: '777' }]);
 
       const sessionId = '123';
@@ -578,7 +654,7 @@ describe('SessionModel', () => {
         .insert(sessions)
         .values({ userId: '777', id: sessionId, title: 'Test Session' });
 
-      // 尝试更新这个 session,应该不会有任何更新
+      // Attempt to update this session — should produce no updates
       const updatedSessions = await sessionModel.update(sessionId, {
         title: 'Updated Test Session',
       });
@@ -587,28 +663,69 @@ describe('SessionModel', () => {
     });
   });
 
+  describe('isSoleShellOfAgent', () => {
+    beforeEach(async () => {
+      await serverDB.insert(sessions).values([
+        { id: 's1', userId },
+        { id: 's2', userId },
+      ]);
+      await serverDB.insert(agents).values([
+        { id: 'a1', userId },
+        { id: 'a2', userId },
+      ]);
+    });
+
+    it("is true for the agent's one and only shell", async () => {
+      await serverDB.insert(agentsToSessions).values([{ agentId: 'a1', sessionId: 's1', userId }]);
+
+      expect(await sessionModel.isSoleShellOfAgent('s1', 'a1')).toBe(true);
+    });
+
+    it('is false when the agent is linked to another session too', async () => {
+      await serverDB.insert(agentsToSessions).values([
+        { agentId: 'a1', sessionId: 's1', userId },
+        { agentId: 'a1', sessionId: 's2', userId },
+      ]);
+
+      expect(await sessionModel.isSoleShellOfAgent('s1', 'a1')).toBe(false);
+    });
+
+    it('is false when the session also holds another agent', async () => {
+      await serverDB.insert(agentsToSessions).values([
+        { agentId: 'a1', sessionId: 's1', userId },
+        { agentId: 'a2', sessionId: 's1', userId },
+      ]);
+
+      expect(await sessionModel.isSoleShellOfAgent('s1', 'a1')).toBe(false);
+    });
+
+    it('is false when the session is not linked to the agent at all', async () => {
+      expect(await sessionModel.isSoleShellOfAgent('s1', 'a1')).toBe(false);
+    });
+  });
+
   describe('delete', () => {
     it('should handle deleting a session with no associated messages or topics', async () => {
-      // 创建测试数据
+      // Create test data
       await serverDB.insert(sessions).values({ id: '1', userId });
 
-      // 调用 delete 方法
+      // Call the delete method
       await sessionModel.delete('1');
 
-      // 断言删除结果
+      // Assert deletion results
       const result = await serverDB.select({ id: sessions.id }).from(sessions);
 
       expect(result).toHaveLength(0);
     });
 
     it('should handle concurrent deletions gracefully', async () => {
-      // 创建测试数据
+      // Create test data
       await serverDB.insert(sessions).values({ id: '1', userId });
 
-      // 并发调用 delete 方法
+      // Concurrently call the delete method
       await Promise.all([sessionModel.delete('1'), sessionModel.delete('1')]);
 
-      // 断言删除结果
+      // Assert deletion results
       const result = await serverDB.select({ id: sessions.id }).from(sessions);
 
       expect(result).toHaveLength(0);
@@ -669,39 +786,171 @@ describe('SessionModel', () => {
       expect(await serverDB.select().from(sessions).where(eq(sessions.id, '1'))).toHaveLength(0);
       expect(await serverDB.select().from(sessions).where(eq(sessions.id, '2'))).toHaveLength(1);
     });
+
+    it('should report orphan-deleted agent ids so callers can clean permission rows', async () => {
+      await serverDB.insert(sessions).values([
+        { id: '1', userId },
+        { id: '2', userId },
+      ]);
+      await serverDB.insert(agents).values([
+        { id: 'orphaned', userId },
+        { id: 'still-linked', userId },
+      ]);
+      await serverDB.insert(agentsToSessions).values([
+        { agentId: 'orphaned', sessionId: '1', userId },
+        { agentId: 'still-linked', sessionId: '1', userId },
+        { agentId: 'still-linked', sessionId: '2', userId },
+      ]);
+
+      const { orphanedAgentIds } = await sessionModel.delete('1');
+
+      expect(orphanedAgentIds).toEqual(['orphaned']);
+      expect(await serverDB.select().from(agents).where(eq(agents.id, 'orphaned'))).toHaveLength(0);
+      expect(
+        await serverDB.select().from(agents).where(eq(agents.id, 'still-linked')),
+      ).toHaveLength(1);
+    });
+  });
+
+  describe('recycle-bin gate (linked agent trashed)', () => {
+    const seedTrashedShell = async () => {
+      // A shell whose agent sits in the recycle bin: the agent is the
+      // restorable unit, so the session must vanish from every legacy read
+      // and write until the agent comes back.
+      await serverDB.insert(sessions).values([
+        { id: 'trashed-shell', slug: 'trashed-shell', userId },
+        { id: 'live-shell', userId },
+      ]);
+      await serverDB.insert(agents).values([
+        { deletedAt: new Date(), id: 'trashed-agent', isDeleted: true, userId },
+        { id: 'live-agent', userId },
+      ]);
+      await serverDB.insert(agentsToSessions).values([
+        { agentId: 'trashed-agent', sessionId: 'trashed-shell', userId },
+        { agentId: 'live-agent', sessionId: 'live-shell', userId },
+      ]);
+      await serverDB
+        .insert(topics)
+        .values({ id: 'recoverable', sessionId: 'trashed-shell', userId });
+    };
+
+    it('hides the shell from list, lookup and count', async () => {
+      await seedTrashedShell();
+      expect((await sessionModel.query()).map((s) => s.id)).toEqual(['live-shell']);
+      expect(await sessionModel.findByIdOrSlug('trashed-shell')).toBeUndefined();
+      expect(await sessionModel.findByIdOrSlug('live-shell')).toBeTruthy();
+      expect(await sessionModel.count()).toBe(1);
+    });
+
+    it('turns delete / batchDelete / update into no-ops so the recoverable topics survive', async () => {
+      await seedTrashedShell();
+
+      const single = await sessionModel.delete('trashed-shell');
+      expect(single.orphanedAgentIds).toEqual([]);
+      const batch = await sessionModel.batchDelete(['trashed-shell', 'live-shell']);
+      expect(batch.orphanedAgentIds).toEqual(['live-agent']);
+      await sessionModel.update('trashed-shell', { title: 'renamed' });
+
+      const [shell] = await serverDB
+        .select()
+        .from(sessions)
+        .where(eq(sessions.id, 'trashed-shell'));
+      expect(shell).toBeTruthy();
+      expect(shell.title).toBeNull();
+      // the link and the topics behind it are untouched — restoring the agent brings everything back
+      expect(
+        await serverDB
+          .select()
+          .from(agentsToSessions)
+          .where(eq(agentsToSessions.sessionId, 'trashed-shell')),
+      ).toHaveLength(1);
+      expect(await serverDB.select().from(topics).where(eq(topics.id, 'recoverable'))).toHaveLength(
+        1,
+      );
+      expect(
+        await serverDB.select().from(sessions).where(eq(sessions.id, 'live-shell')),
+      ).toHaveLength(0);
+    });
+
+    it('keeps a legacy group session with live members reachable, minus the trashed member', async () => {
+      await serverDB.insert(sessions).values({ id: 'group-shell', type: 'group', userId });
+      await serverDB.insert(agents).values([
+        { deletedAt: new Date(), id: 'trashed-member', isDeleted: true, userId },
+        { id: 'live-member', userId },
+      ]);
+      await serverDB.insert(agentsToSessions).values([
+        { agentId: 'trashed-member', sessionId: 'group-shell', userId },
+        { agentId: 'live-member', sessionId: 'group-shell', userId },
+      ]);
+
+      const [group] = await sessionModel.query();
+      expect(group.id).toBe('group-shell');
+      expect(group.agentsToSessions.map((l: any) => l.agent.id)).toEqual(['live-member']);
+      expect((await sessionModel.findByIdOrSlug('group-shell'))?.agent.id).toBe('live-member');
+      expect(await sessionModel.count()).toBe(1);
+
+      // still write-protected: hard-deleting it would cascade the trashed member's link away
+      await sessionModel.delete('group-shell');
+      expect(
+        await serverDB.select().from(sessions).where(eq(sessions.id, 'group-shell')),
+      ).toHaveLength(1);
+    });
+
+    it('hides a legacy group session once every member is trashed', async () => {
+      await serverDB.insert(sessions).values({ id: 'group-shell', type: 'group', userId });
+      await serverDB
+        .insert(agents)
+        .values({ deletedAt: new Date(), id: 'trashed-member', isDeleted: true, userId });
+      await serverDB
+        .insert(agentsToSessions)
+        .values({ agentId: 'trashed-member', sessionId: 'group-shell', userId });
+
+      expect(await sessionModel.query()).toEqual([]);
+      expect(await sessionModel.findByIdOrSlug('group-shell')).toBeUndefined();
+    });
+
+    it('deleteAll leaves the hidden shell in place', async () => {
+      await seedTrashedShell();
+      await sessionModel.deleteAll();
+      const remaining = await serverDB.select().from(sessions).where(eq(sessions.userId, userId));
+      expect(remaining.map((s) => s.id)).toEqual(['trashed-shell']);
+      expect(await serverDB.select().from(topics).where(eq(topics.id, 'recoverable'))).toHaveLength(
+        1,
+      );
+    });
   });
 
   describe('batchDelete', () => {
     it('should handle deleting sessions with no associated messages or topics', async () => {
-      // 创建测试数据
+      // Create test data
       await serverDB.insert(sessions).values([
         { id: '1', userId },
         { id: '2', userId },
       ]);
 
-      // 调用 batchDelete 方法
+      // Call the batchDelete method
       await sessionModel.batchDelete(['1', '2']);
 
-      // 断言删除结果
+      // Assert deletion results
       const result = await serverDB.select({ id: sessions.id }).from(sessions);
 
       expect(result).toHaveLength(0);
     });
 
     it('should handle concurrent batch deletions gracefully', async () => {
-      // 创建测试数据
+      // Create test data
       await serverDB.insert(sessions).values([
         { id: '1', userId },
         { id: '2', userId },
       ]);
 
-      // 并发调用 batchDelete 方法
+      // Concurrently call the batchDelete method
       await Promise.all([
         sessionModel.batchDelete(['1', '2']),
         sessionModel.batchDelete(['1', '2']),
       ]);
 
-      // 断言删除结果
+      // Assert deletion results
       const result = await serverDB.select({ id: sessions.id }).from(sessions);
 
       expect(result).toHaveLength(0);
@@ -1299,170 +1548,6 @@ describe('SessionModel', () => {
     });
   });
 
-  describe('rank', () => {
-    it('should return ranked sessions based on topic count', async () => {
-      // Create test data
-      await serverDB.transaction(async (trx) => {
-        // Create sessions
-        await trx.insert(sessions).values([
-          { id: '1', userId },
-          { id: '2', userId },
-          { id: '3', userId },
-        ]);
-
-        // Create agents
-        await trx.insert(agents).values([
-          { id: 'a1', userId, title: 'Agent 1', avatar: 'avatar1', backgroundColor: 'bg1' },
-          { id: 'a2', userId, title: 'Agent 2', avatar: 'avatar2', backgroundColor: 'bg2' },
-          { id: 'a3', userId, title: 'Agent 3', avatar: 'avatar3', backgroundColor: 'bg3' },
-        ]);
-
-        // Link agents to sessions
-        await trx.insert(agentsToSessions).values([
-          { sessionId: '1', agentId: 'a1', userId },
-          { sessionId: '2', agentId: 'a2', userId },
-          { sessionId: '3', agentId: 'a3', userId },
-        ]);
-
-        // Create topics (different counts for ranking)
-        await trx.insert(topics).values([
-          { id: 't1', sessionId: '1', userId },
-          { id: 't2', sessionId: '1', userId },
-          { id: 't3', sessionId: '1', userId }, // Session 1 has 3 topics
-          { id: 't4', sessionId: '2', userId },
-          { id: 't5', sessionId: '2', userId }, // Session 2 has 2 topics
-          { id: 't6', sessionId: '3', userId }, // Session 3 has 1 topic
-        ]);
-      });
-
-      // Get ranked sessions with default limit
-      const result = await sessionModel.rank();
-
-      // Verify results
-      expect(result).toHaveLength(3);
-      // Should be ordered by topic count (descending)
-      expect(result[0]).toMatchObject({
-        id: '1',
-        count: 3,
-        title: 'Agent 1',
-        avatar: 'avatar1',
-        backgroundColor: 'bg1',
-      });
-      expect(result[1]).toMatchObject({
-        id: '2',
-        count: 2,
-        title: 'Agent 2',
-        avatar: 'avatar2',
-        backgroundColor: 'bg2',
-      });
-      expect(result[2]).toMatchObject({
-        id: '3',
-        count: 1,
-        title: 'Agent 3',
-        avatar: 'avatar3',
-        backgroundColor: 'bg3',
-      });
-    });
-
-    it('should respect the limit parameter', async () => {
-      // Create test data
-      await serverDB.transaction(async (trx) => {
-        // Create sessions and related data
-        await trx.insert(sessions).values([
-          { id: '1', userId },
-          { id: '2', userId },
-          { id: '3', userId },
-        ]);
-
-        await trx.insert(agents).values([
-          { id: 'a1', userId, title: 'Agent 1' },
-          { id: 'a2', userId, title: 'Agent 2' },
-          { id: 'a3', userId, title: 'Agent 3' },
-        ]);
-
-        await trx.insert(agentsToSessions).values([
-          { sessionId: '1', agentId: 'a1', userId },
-          { sessionId: '2', agentId: 'a2', userId },
-          { sessionId: '3', agentId: 'a3', userId },
-        ]);
-
-        await trx.insert(topics).values([
-          { id: 't1', sessionId: '1', userId },
-          { id: 't2', sessionId: '1', userId },
-          { id: 't6', sessionId: '1', userId },
-          { id: 't3', sessionId: '2', userId },
-          { id: 't8', sessionId: '2', userId },
-          { id: 't4', sessionId: '3', userId },
-        ]);
-      });
-
-      // Get ranked sessions with limit of 2
-      const result = await sessionModel.rank(2);
-
-      // Verify results
-      expect(result).toHaveLength(2);
-      expect(result[0].id).toBe('1'); // Most topics (2)
-      expect(result[1].id).toBe('2'); // Second most topics (1)
-    });
-
-    it('should include inbox topics in ranking when topics have no sessionId', async () => {
-      await serverDB.transaction(async (trx) => {
-        await trx.insert(sessions).values([{ id: '1', userId }]);
-        await trx
-          .insert(agents)
-          .values([{ id: 'a1', userId, title: 'Agent 1', avatar: 'av1', backgroundColor: 'bg1' }]);
-        await trx.insert(agentsToSessions).values([{ sessionId: '1', agentId: 'a1', userId }]);
-
-        // Create topics: 1 for session, 3 for inbox (no sessionId)
-        await trx.insert(topics).values([
-          { id: 'inbox-t1', userId, sessionId: null },
-          { id: 'inbox-t2', userId, sessionId: null },
-          { id: 'inbox-t3', userId, sessionId: null },
-          { id: 'session-t1', sessionId: '1', userId },
-        ]);
-      });
-
-      const result = await sessionModel.rank();
-
-      // Should include both inbox and session entries
-      expect(result.length).toBeGreaterThanOrEqual(2);
-      // Inbox should have 3 topics and be ranked first
-      const inboxEntry = result.find((r) => r.id === 'inbox');
-      expect(inboxEntry).toBeDefined();
-      expect(inboxEntry?.count).toBe(3);
-      // Session should have 1 topic
-      const sessionEntry = result.find((r) => r.id === '1');
-      expect(sessionEntry).toBeDefined();
-      expect(sessionEntry?.count).toBe(1);
-    });
-
-    it('should handle sessions with no topics', async () => {
-      // Create test data
-      await serverDB.transaction(async (trx) => {
-        await trx.insert(sessions).values([
-          { id: '1', userId },
-          { id: '2', userId },
-        ]);
-
-        await trx.insert(agents).values([
-          { id: 'a1', userId, title: 'Agent 1' },
-          { id: 'a2', userId, title: 'Agent 2' },
-        ]);
-
-        await trx.insert(agentsToSessions).values([
-          { sessionId: '1', agentId: 'a1', userId },
-          { sessionId: '2', agentId: 'a2', userId },
-        ]);
-
-        // No topics created
-      });
-
-      const result = await sessionModel.rank();
-
-      expect(result).toHaveLength(0);
-    });
-  });
-
   describe('hasMoreThanN', () => {
     it('should return true when session count is more than N', async () => {
       // Create test data
@@ -1519,7 +1604,7 @@ describe('SessionModel', () => {
 
   describe('findSessionsByKeywords', () => {
     it('should handle errors gracefully and return empty array', async () => {
-      // 这个测试旨在覆盖 findSessionsByKeywords 中的错误处理逻辑
+      // This test aims to cover the error-handling logic in findSessionsByKeywords
       const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
       // Mock the database query to throw an error
@@ -1528,7 +1613,7 @@ describe('SessionModel', () => {
 
       const result = await sessionModel.findSessionsByKeywords({ keyword: 'test' });
 
-      // 即使发生错误，方法也应该返回一个空数组
+      // Even when an error occurs, the method should return an empty array
       expect(Array.isArray(result)).toBe(true);
       expect(result).toEqual([]);
       expect(consoleSpy).toHaveBeenCalledWith('findSessionsByKeywords error:', expect.any(Error), {

@@ -1,20 +1,25 @@
-import { type FileListItem } from '@/types/files';
-import { type RecentTopic } from '@/types/topic';
+import type { RecentItem } from '@lobechat/types';
+
+import { createReplicaState, type ReplicaState } from '@/libs/replica';
+
+export { createRecentQueryKey } from './projection';
+
+/** `${type}:${id}`: ids of different entity types can collide. */
+export type RecentEntityRef = `${RecentItem['type']}:${string}`;
+
+export const toRecentEntityRef = (item: Pick<RecentItem, 'id' | 'type'>): RecentEntityRef =>
+  `${item.type}:${item.id}`;
 
 export interface RecentState {
-  isRecentPagesInit: boolean;
-  isRecentResourcesInit: boolean;
-  isRecentTopicsInit: boolean;
-  recentPages: any[];
-  recentResources: FileListItem[];
-  recentTopics: RecentTopic[];
+  allRecentsDrawerOpen: boolean;
+  /** Recents per query (`limit:N`), the view of the `recentList` replica. */
+  recentListMap: Record<string, RecentItem[]>;
+  /** Replica bookkeeping for `recentListMap`. */
+  recentListReplica: ReplicaState<RecentItem[]>;
 }
 
 export const initialRecentState: RecentState = {
-  isRecentPagesInit: false,
-  isRecentResourcesInit: false,
-  isRecentTopicsInit: false,
-  recentPages: [],
-  recentResources: [],
-  recentTopics: [],
+  allRecentsDrawerOpen: false,
+  recentListMap: {},
+  recentListReplica: createReplicaState(),
 };

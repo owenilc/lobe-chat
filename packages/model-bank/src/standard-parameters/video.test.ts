@@ -20,10 +20,17 @@ describe('video standard-parameters', () => {
         duration: { default: 5, max: 10, min: 1, step: 1 },
         endImageUrl: { default: null },
         generateAudio: { default: true },
+        promptExtend: { default: 'standard', enum: ['standard', 'fast'] },
+        watermark: { default: false },
+        webSearch: { default: true },
         imageUrl: { default: null },
         prompt: { default: '' },
         resolution: { default: '720p', enum: ['480p', '720p', '1080p'] },
         seed: { default: null },
+        task: {
+          default: 'text_to_video',
+          enum: ['text_to_video', 'image_to_video', 'reference_to_video', 'edit'],
+        },
       };
 
       expect(() => VideoModelParamsMetaSchema.parse(fullSchema)).not.toThrow();
@@ -41,6 +48,9 @@ describe('video standard-parameters', () => {
       const schema: VideoModelParamsSchema = {
         cameraFixed: {},
         generateAudio: {},
+        promptExtend: { default: true },
+        watermark: {},
+        webSearch: {},
         prompt: {},
         seed: {},
       };
@@ -50,9 +60,13 @@ describe('video standard-parameters', () => {
       expect(result.prompt.default).toBe('');
       expect(result.cameraFixed?.default).toBe(false);
       expect(result.generateAudio?.default).toBe(true);
+      expect(result.promptExtend?.default).toBe(true);
+      expect(result.watermark?.default).toBe(false);
+      expect(result.webSearch?.default).toBe(true);
       expect(result.seed?.default).toBeNull();
       expect(result.seed?.max).toBe(MAX_VIDEO_SEED);
       expect(result.seed?.min).toBe(-1);
+      expect(result.task).toBeUndefined();
     });
 
     it('should reject invalid types', () => {
@@ -89,9 +103,16 @@ describe('video standard-parameters', () => {
         cameraFixed: { default: true },
         duration: { default: 5, max: 10, min: 1 },
         generateAudio: { default: false },
+        promptExtend: { default: 'fast', enum: ['standard', 'fast'] },
+        watermark: { default: true },
+        webSearch: { default: false },
         prompt: { default: 'test prompt' },
         resolution: { default: '1080p', enum: ['720p', '1080p'] },
         seed: { default: 42 },
+        task: {
+          default: 'edit',
+          enum: ['text_to_video', 'image_to_video', 'reference_to_video', 'edit'],
+        },
       };
 
       const result = extractVideoDefaultValues(schema);
@@ -101,8 +122,12 @@ describe('video standard-parameters', () => {
       expect(result.cameraFixed).toBe(true);
       expect(result.duration).toBe(5);
       expect(result.generateAudio).toBe(false);
+      expect(result.promptExtend).toBe('fast');
+      expect(result.watermark).toBe(true);
+      expect(result.webSearch).toBe(false);
       expect(result.resolution).toBe('1080p');
       expect(result.seed).toBe(42);
+      expect(result.task).toBe('edit');
     });
 
     it('should extract defaults from minimal schema', () => {
@@ -132,6 +157,9 @@ describe('video standard-parameters', () => {
       const schema: VideoModelParamsSchema = {
         cameraFixed: { default: false },
         generateAudio: { default: true },
+        promptExtend: { default: 'standard', enum: ['standard', 'fast'] },
+        watermark: { default: false },
+        webSearch: { default: true },
         prompt: { default: 'hello' },
         seed: { default: null },
       };
@@ -141,6 +169,9 @@ describe('video standard-parameters', () => {
       expect(typeof result.prompt).toBe('string');
       expect(typeof result.cameraFixed).toBe('boolean');
       expect(typeof result.generateAudio).toBe('boolean');
+      expect(typeof result.promptExtend).toBe('string');
+      expect(typeof result.watermark).toBe('boolean');
+      expect(typeof result.webSearch).toBe('boolean');
       expect(result.seed).toBeNull();
     });
   });
@@ -172,6 +203,9 @@ describe('video standard-parameters', () => {
       expect(params.prompt).toBe('required prompt');
       expect(params.cameraFixed).toBeUndefined();
       expect(params.generateAudio).toBeUndefined();
+      expect(params.promptExtend).toBeUndefined();
+      expect(params.watermark).toBeUndefined();
+      expect(params.webSearch).toBeUndefined();
       expect(params.seed).toBeUndefined();
     });
   });

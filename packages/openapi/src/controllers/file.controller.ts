@@ -1,67 +1,105 @@
 import type { Context } from 'hono';
+import { HTTPException } from 'hono/http-exception';
 
 import { BaseController } from '../common/base.controller';
 import { FileUploadService } from '../services/file.service';
 import type {
+  BatchFileUploadFormFields,
   BatchFileUploadRequest,
   BatchGetFilesRequest,
   FileChunkRequest,
   FileListQuery,
   FileParseRequest,
+  FileUploadFormFields,
   FileUrlRequest,
   PublicFileUploadRequest,
   UpdateFileRequest,
 } from '../types/file.type';
+import { BatchFileUploadFormFieldsSchema, FileUploadFormFieldsSchema } from '../types/file.type';
+
+const getMultipartTextFields = (formData: FormData, fields: readonly string[]) =>
+  Object.fromEntries(
+    fields.map((field) => {
+      const value = formData.get(field);
+      return [field, typeof value === 'string' ? value : undefined];
+    }),
+  );
+
+const parseMultipartFields = <T>(result: {
+  error?: { issues: Array<{ message: string }> };
+  success: boolean;
+  data?: T;
+}): T => {
+  if (!result.success) {
+    throw new HTTPException(400, {
+      message: result.error?.issues[0]?.message ?? 'Invalid multipart form fields',
+    });
+  }
+
+  return result.data!;
+};
 
 /**
- * 文件上传控制器
- * 处理文件上传相关的HTTP请求
+ * File upload controller
+ * Handles file upload-related HTTP requests
  */
 export class FileController extends BaseController {
   /**
-   * 批量文件上传
+   * Batch file upload
    * POST /files/batches
    */
   async batchUploadFiles(c: Context) {
     try {
-      const userId = this.getUserId(c)!; // requireAuth 中间件已确保 userId 存在
+      const userId = this.getUserId(c)!; // requireAuth middleware ensures userId exists
 
       const db = await this.getDatabase();
-      const fileService = new FileUploadService(db, userId);
+      const fileService = new FileUploadService(db, userId, this.getWorkspaceId(c));
 
-      // 处理 multipart/form-data（返回对象：{ fields, files }）
+      // Process multipart/form-data (returns object: { fields, files })
       const formData = await this.getFormData(c);
       const files: File[] = [];
 
-      // 兼容写法：从 'files' 或 'files[]' 字段获取文件
-      // 因为Stainless SDK 会将数组字段自动添加 [] 后缀
+      // Compatibility: get files from 'files' or 'files[]' field
+      // because the Stainless SDK automatically appends [] suffix to array fields
       let fileEntries = formData.getAll('files');
       if (fileEntries.length === 0) {
         fileEntries = formData.getAll('files[]');
       }
 
       for (const file of fileEntries) {
-        if (file instanceof File) files.push(file);
+        if (!(file instanceof File)) {
+          throw new HTTPException(400, { message: 'Every files entry must be a binary file' });
+        }
+        files.push(file);
       }
 
       if (!files.length) {
         return this.error(c, 'No files provided', 400);
       }
 
-      // 获取其他参数
-      const knowledgeBaseId = (formData.get('knowledgeBaseId') as string | null) || null;
-      const skipCheckFileType = formData.get('skipCheckFileType') === 'true';
-      const directory = (formData.get('directory') as string | null) || null;
-      const agentId = (formData.get('agentId') as string | null) || null;
-      const sessionId = (formData.get('sessionId') as string | null) || null;
+      if (files.length > 20) {
+        return this.error(c, 'A batch can contain at most 20 files', 400);
+      }
+
+      const fields = parseMultipartFields<BatchFileUploadFormFields>(
+        BatchFileUploadFormFieldsSchema.safeParse(
+          getMultipartTextFields(formData, [
+            'agentId',
+            'directory',
+            'knowledgeBaseId',
+            'sessionId',
+            'skipCheckFileType',
+          ]),
+        ),
+      );
 
       const request: BatchFileUploadRequest = {
-        agentId: agentId || undefined,
-        directory: directory || undefined,
+        agentId: fields.agentId,
+        directory: fields.directory,
         files,
-        knowledgeBaseId: knowledgeBaseId || undefined,
-        sessionId: sessionId || undefined,
-        skipCheckFileType,
+        knowledgeBaseId: fields.knowledgeBaseId,
+        sessionId: fields.sessionId,
+        skipCheckFileType: fields.skipCheckFileType,
       };
 
       const result = await fileService.uploadFiles(request);
@@ -77,7 +115,7 @@ export class FileController extends BaseController {
   }
 
   /**
-   * 获取文件列表
+   * Retrieves the file list
    * GET /files
    */
   async getFiles(c: Context) {
@@ -87,7 +125,7 @@ export class FileController extends BaseController {
       const query = this.getQuery(c) as FileListQuery;
 
       const db = await this.getDatabase();
-      const fileService = new FileUploadService(db, userId);
+      const fileService = new FileUploadService(db, userId, this.getWorkspaceId(c));
 
       const result = await fileService.getFileList(query);
 
@@ -98,15 +136,15 @@ export class FileController extends BaseController {
   }
 
   /**
-   * 获取单个文件详情
+   * Retrieves a single file's details
    * GET /files/:id
    */
   async getFile(c: Context) {
     try {
-      const userId = this.getUserId(c)!; // requireAuth 中间件已确保 userId 存在
+      const userId = this.getUserId(c)!; // requireAuth middleware ensures userId exists
       const { id } = this.getParams(c);
       const db = await this.getDatabase();
-      const fileService = new FileUploadService(db, userId);
+      const fileService = new FileUploadService(db, userId, this.getWorkspaceId(c));
 
       const result = await fileService.getFileDetail(id);
 
@@ -117,22 +155,22 @@ export class FileController extends BaseController {
   }
 
   /**
-   * 获取文件访问URL
+   * Retrieves the file access URL
    * GET /files/:id/url
    */
   async getFileUrl(c: Context) {
     try {
-      const userId = this.getUserId(c)!; // requireAuth 中间件已确保 userId 存在
+      const userId = this.getUserId(c)!; // requireAuth middleware ensures userId exists
       const { id } = this.getParams(c);
       const query = this.getQuery(c);
 
-      // 解析查询参数
+      // Parse query parameters
       const options: FileUrlRequest = {
         expiresIn: query.expiresIn ? parseInt(query.expiresIn as string, 10) : undefined,
       };
 
       const db = await this.getDatabase();
-      const fileService = new FileUploadService(db, userId);
+      const fileService = new FileUploadService(db, userId, this.getWorkspaceId(c));
 
       const result = await fileService.getFileUrl(id, options);
 
@@ -143,38 +181,38 @@ export class FileController extends BaseController {
   }
 
   /**
-   * 文件上传
+   * File upload
    * POST /files
    */
   async uploadFile(c: Context) {
     try {
-      const userId = this.getUserId(c)!; // requireAuth 中间件已确保 userId 存在
+      const userId = this.getUserId(c)!; // requireAuth middleware ensures userId exists
 
       const db = await this.getDatabase();
-      const fileService = new FileUploadService(db, userId);
+      const fileService = new FileUploadService(db, userId, this.getWorkspaceId(c));
 
       const formData = await this.getFormData(c);
-      const file = formData.get('file') as File | null;
+      const file = formData.get('file');
 
-      if (!file) {
+      if (!(file instanceof File)) {
         return this.error(c, 'No file provided', 400);
       }
 
-      // 获取其他参数
-      const knowledgeBaseId = (formData.get('knowledgeBaseId') as string | null) || null;
-      const skipCheckFileType = formData.get('skipCheckFileType') === 'true';
-      const directory = (formData.get('directory') as string | null) || null;
-      const agentId = (formData.get('agentId') as string | null) || null;
-      const sessionId = (formData.get('sessionId') as string | null) || null;
-      const skipDeduplication = formData.get('skipDeduplication') === 'true';
+      const fields = parseMultipartFields<FileUploadFormFields>(
+        FileUploadFormFieldsSchema.safeParse(
+          getMultipartTextFields(formData, [
+            'agentId',
+            'directory',
+            'knowledgeBaseId',
+            'sessionId',
+            'skipCheckFileType',
+            'skipDeduplication',
+          ]),
+        ),
+      );
 
       const options: PublicFileUploadRequest = {
-        agentId: agentId || undefined,
-        directory: directory || undefined,
-        knowledgeBaseId: knowledgeBaseId || undefined,
-        sessionId: sessionId || undefined,
-        skipCheckFileType,
-        skipDeduplication,
+        ...fields,
       };
 
       const result = await fileService.uploadFile(file, options);
@@ -186,22 +224,22 @@ export class FileController extends BaseController {
   }
 
   /**
-   * 解析文件内容
+   * Parses file content
    * POST /files/:id/parses
    */
   async parseFile(c: Context) {
     try {
-      const userId = this.getUserId(c)!; // requireAuth 中间件已确保 userId 存在
+      const userId = this.getUserId(c)!; // requireAuth middleware ensures userId exists
       const { id } = this.getParams(c);
       const query = this.getQuery<{ skipExist?: boolean }>(c);
 
-      // 解析查询参数
+      // Parse query parameters
       const options: Partial<FileParseRequest> = {
         skipExist: query.skipExist,
       };
 
       const db = await this.getDatabase();
-      const fileService = new FileUploadService(db, userId);
+      const fileService = new FileUploadService(db, userId, this.getWorkspaceId(c));
 
       const result = await fileService.parseFile(id, options);
 
@@ -212,17 +250,17 @@ export class FileController extends BaseController {
   }
 
   /**
-   * 创建分块任务（可选自动触发嵌入）
+   * Creates a chunking task (optionally auto-triggers embedding)
    * POST /files/:id/chunks
    */
   async createChunkTask(c: Context) {
     try {
-      const userId = this.getUserId(c)!; // requireAuth 已确保 userId 存在
+      const userId = this.getUserId(c)!; // requireAuth ensures userId exists
       const { id } = this.getParams(c);
       const body = await this.getBody<Partial<FileChunkRequest>>(c);
 
       const db = await this.getDatabase();
-      const fileService = new FileUploadService(db, userId);
+      const fileService = new FileUploadService(db, userId, this.getWorkspaceId(c));
 
       const result = await fileService.createChunkTask(id, {
         autoEmbedding: body?.autoEmbedding,
@@ -236,16 +274,16 @@ export class FileController extends BaseController {
   }
 
   /**
-   * 查询文件分块结果和状态
+   * Retrieves file chunk results and status
    * GET /files/:id/chunks
    */
   async getFileChunkStatus(c: Context) {
     try {
-      const userId = this.getUserId(c)!; // requireAuth 已确保 userId 存在
+      const userId = this.getUserId(c)!; // requireAuth ensures userId exists
       const { id } = this.getParams(c);
 
       const db = await this.getDatabase();
-      const fileService = new FileUploadService(db, userId);
+      const fileService = new FileUploadService(db, userId, this.getWorkspaceId(c));
 
       const result = await fileService.getFileChunkStatus(id);
 
@@ -256,15 +294,15 @@ export class FileController extends BaseController {
   }
 
   /**
-   * 删除文件
+   * Deletes a file
    * DELETE /files/:id
    */
   async deleteFile(c: Context) {
     try {
-      const userId = this.getUserId(c)!; // requireAuth 中间件已确保 userId 存在
+      const userId = this.getUserId(c)!; // requireAuth middleware ensures userId exists
       const { id } = this.getParams(c);
       const db = await this.getDatabase();
-      const fileService = new FileUploadService(db, userId);
+      const fileService = new FileUploadService(db, userId, this.getWorkspaceId(c));
 
       const result = await fileService.deleteFile(id);
 
@@ -275,12 +313,12 @@ export class FileController extends BaseController {
   }
 
   /**
-   * 批量获取文件详情和内容
+   * Batch retrieves file details and content
    * POST /files/queries
    */
   async queries(c: Context) {
     try {
-      const userId = this.getUserId(c)!; // requireAuth 中间件已确保 userId 存在
+      const userId = this.getUserId(c)!; // requireAuth middleware ensures userId exists
       const body = await this.getBody<BatchGetFilesRequest>(c);
 
       if (!body || !body.fileIds || body.fileIds.length === 0) {
@@ -288,7 +326,7 @@ export class FileController extends BaseController {
       }
 
       const db = await this.getDatabase();
-      const fileService = new FileUploadService(db, userId);
+      const fileService = new FileUploadService(db, userId, this.getWorkspaceId(c));
 
       const result = await fileService.handleQueries(body);
 
@@ -299,17 +337,17 @@ export class FileController extends BaseController {
   }
 
   /**
-   * 更新文件
+   * Updates a file
    * PATCH /files/:id
    */
   async updateFile(c: Context) {
     try {
-      const userId = this.getUserId(c)!; // requireAuth 中间件已确保 userId 存在
+      const userId = this.getUserId(c)!; // requireAuth middleware ensures userId exists
       const { id } = this.getParams(c);
       const body = await this.getBody<UpdateFileRequest>(c);
 
       const db = await this.getDatabase();
-      const fileService = new FileUploadService(db, userId);
+      const fileService = new FileUploadService(db, userId, this.getWorkspaceId(c));
 
       const result = await fileService.updateFile(id, body);
 

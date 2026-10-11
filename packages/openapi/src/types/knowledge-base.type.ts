@@ -1,26 +1,25 @@
 import { z } from 'zod';
 
-import type { KnowledgeBaseItem } from '@/database/schemas';
-
+import type { PublicKnowledgeBase } from '../helpers/public-fields';
 import type { IPaginationQuery, PaginationQueryResponse } from './common.type';
 import { PaginationQuerySchema } from './common.type';
 
 // ==================== Knowledge Base Query Types ====================
 
 /**
- * 知识库列表查询参数
+ * Knowledge base list query parameters
  */
 export interface KnowledgeBaseListQuery extends IPaginationQuery {
-  // 继承自 IPaginationQuery: keyword, page, pageSize
+  // Inherited from IPaginationQuery: keyword, page, pageSize
 }
 
 export const KnowledgeBaseListQuerySchema = PaginationQuerySchema;
 
 /**
- * 知识库文件列表查询参数
+ * Knowledge base file list query parameters
  */
 export interface KnowledgeBaseFileListQuery extends IPaginationQuery {
-  /** 文件类型过滤 */
+  /** File type filter */
   fileType?: string;
 }
 
@@ -29,137 +28,146 @@ export const KnowledgeBaseFileListQuerySchema = PaginationQuerySchema.extend({
 });
 
 /**
- * 知识库文件批量操作请求
+ * Knowledge base file batch operation request
  */
 export interface KnowledgeBaseFileBatchRequest {
-  /** 文件 ID 列表 */
+  /** File ID list */
   fileIds: string[];
 }
 
 export const KnowledgeBaseFileBatchSchema = z.object({
-  fileIds: z.array(z.string().min(1, '文件ID不能为空')).min(1, '文件ID列表不能为空'),
+  fileIds: z
+    .array(z.string().min(1, 'File ID cannot be empty'))
+    .min(1, 'File ID list cannot be empty'),
 });
 
 /**
- * 知识库文件移动请求
+ * Knowledge base file move request
  */
 export interface MoveKnowledgeBaseFilesRequest extends KnowledgeBaseFileBatchRequest {
-  /** 目标知识库 ID */
+  /** Target knowledge base ID */
   targetKnowledgeBaseId: string;
 }
 
 export const MoveKnowledgeBaseFilesSchema = KnowledgeBaseFileBatchSchema.extend({
-  targetKnowledgeBaseId: z.string().min(1, '目标知识库 ID 不能为空'),
+  targetKnowledgeBaseId: z.string().min(1, 'Target knowledge base ID cannot be empty'),
 });
 
 /**
- * 知识库文件批量操作结果
+ * Knowledge base file batch operation result
  */
 export interface KnowledgeBaseFileOperationResult {
-  /** 失败的文件及原因 */
+  /** Failed files and reasons */
   failed: Array<{
     fileId: string;
     reason: string;
   }>;
-  /** 操作成功的文件 ID 列表 */
+  /** List of successfully operated file IDs */
   successed: string[];
 }
 
 /**
- * 知识库文件移动结果
+ * Knowledge base file move result
  */
 export interface MoveKnowledgeBaseFilesResponse {
-  /** 失败的文件及原因 */
+  /** Failed files and reasons */
   failed: Array<{
     fileId: string;
     reason: string;
   }>;
-  /** 成功移动的文件 ID 列表 */
+  /** List of successfully moved file IDs */
   successed: string[];
 }
 
 /**
- * 知识库列表响应类型
+ * Knowledge base list response type
  */
 export type KnowledgeBaseAccessType = 'owner' | 'userGrant' | 'roleGrant' | 'public';
 
-export interface KnowledgeBaseListItem extends KnowledgeBaseItem {
-  /** 当前用户对该知识库的访问来源类型 */
+export interface KnowledgeBaseListItem extends PublicKnowledgeBase {
+  /** The access source type for the current user on this knowledge base */
   accessType?: KnowledgeBaseAccessType;
 }
 
 export type KnowledgeBaseListResponse = PaginationQueryResponse<{
-  /** 知识库列表 */
+  /** Knowledge base list */
   knowledgeBases: KnowledgeBaseListItem[];
 }>;
 
 // ==================== Knowledge Base Management Types ====================
 
 /**
- * 知识库ID参数
+ * Knowledge base ID parameter
  */
 export const KnowledgeBaseIdParamSchema = z.object({
-  id: z.string().min(1, '知识库 ID 不能为空'),
+  id: z.string().min(1, 'Knowledge base ID cannot be empty'),
 });
 
 /**
- * 创建知识库请求类型
+ * Create knowledge base request type
  */
 export interface CreateKnowledgeBaseRequest {
-  /** 知识库头像 */
+  /** Knowledge base avatar */
   avatar?: string;
-  /** 知识库描述 */
+  /** Knowledge base description */
   description?: string;
-  /** 知识库名称 */
+  /** Knowledge base name */
   name: string;
 }
 
 export const CreateKnowledgeBaseSchema = z.object({
-  avatar: z.string().url('头像必须是有效的URL').optional(),
-  description: z.string().max(1000, '知识库描述过长').optional(),
-  name: z.string().min(1, '知识库名称不能为空').max(255, '知识库名称过长'),
+  avatar: z.string().url('Avatar must be a valid URL').optional(),
+  description: z.string().max(1000, 'Knowledge base description is too long').optional(),
+  name: z
+    .string()
+    .min(1, 'Knowledge base name cannot be empty')
+    .max(255, 'Knowledge base name is too long'),
 });
 
 /**
- * 创建知识库响应类型
+ * Create knowledge base response type
  */
 export interface CreateKnowledgeBaseResponse {
-  /** 知识库信息 */
-  knowledgeBase: KnowledgeBaseItem;
+  /** Knowledge base info */
+  knowledgeBase: PublicKnowledgeBase;
 }
 
 /**
- * 更新知识库请求类型
+ * Update knowledge base request type
  */
 export interface UpdateKnowledgeBaseRequest {
-  /** 知识库头像 */
+  /** Knowledge base avatar */
   avatar?: string;
-  /** 知识库描述 */
+  /** Knowledge base description */
   description?: string;
-  /** 知识库名称 */
+  /** Knowledge base name */
   name?: string;
 }
 
 export const UpdateKnowledgeBaseSchema = z.object({
-  avatar: z.string().url('头像必须是有效的URL').optional(),
-  description: z.string().max(1000, '知识库描述过长').optional(),
-  name: z.string().min(1, '知识库名称不能为空').max(255, '知识库名称过长').optional(),
+  avatar: z.string().url('Avatar must be a valid URL').optional(),
+  description: z.string().max(1000, 'Knowledge base description is too long').optional(),
+  name: z
+    .string()
+    .min(1, 'Knowledge base name cannot be empty')
+    .max(255, 'Knowledge base name is too long')
+    .optional(),
 });
 
 /**
- * 知识库详情响应类型
+ * Knowledge base detail response type
  */
 export interface KnowledgeBaseDetailResponse {
-  /** 知识库信息 */
-  knowledgeBase: KnowledgeBaseItem;
+  /** Knowledge base info */
+  knowledgeBase: PublicKnowledgeBase;
 }
 
 /**
- * 删除知识库响应类型
+ * Delete knowledge base response type
  */
 export interface DeleteKnowledgeBaseResponse {
-  /** 响应消息 */
+  /** Response message */
   message?: string;
-  /** 是否删除成功 */
+  /** Whether the deletion was successful */
   success: boolean;
 }

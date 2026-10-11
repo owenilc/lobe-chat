@@ -5,20 +5,25 @@ const cerebrasModels: AIChatModelCard[] = [
     abilities: {
       functionCall: true,
       reasoning: true,
-      structuredOutput: true,
+      vision: true,
     },
     contextWindowTokens: 131_072,
     description:
-      'This model delivers strong coding performance with advanced reasoning capabilities, superior tool use, and enhanced real-world performance in agentic coding applications.',
-    displayName: 'GLM 4.7',
+      'This model excels at multimodal reasoning across screenshots, documents, diagrams, and design assets. Ideal for visual agentic workflows, image-aware copilots, and teams migrating from closed multimodal APIs to an open model.',
+    displayName: 'Gemma 4 31B',
     enabled: true,
-    id: 'zai-glm-4.7',
-    maxOutput: 40_000,
+    family: 'gemma',
+    generation: 'gemma-4',
+    id: 'gemma-4-31b',
+    maxOutput: 40_960,
     pricing: {
       units: [
-        { name: 'textInput', rate: 2.25, strategy: 'fixed', unit: 'millionTokens' },
-        { name: 'textOutput', rate: 2.75, strategy: 'fixed', unit: 'millionTokens' },
+        { name: 'textInput', rate: 0.99, strategy: 'fixed', unit: 'millionTokens' },
+        { name: 'textOutput', rate: 1.49, strategy: 'fixed', unit: 'millionTokens' },
       ],
+    },
+    settings: {
+      extendParams: ['enableReasoning'],
     },
     type: 'chat',
   },
@@ -29,8 +34,11 @@ const cerebrasModels: AIChatModelCard[] = [
     },
     contextWindowTokens: 131_072,
     displayName: 'GPT OSS 120B',
-    enabled: true,
+    family: 'gpt-oss',
+    generation: 'gpt-oss',
     id: 'gpt-oss-120b',
+    knowledgeCutoff: '2024-06',
+    maxOutput: 40_960,
     pricing: {
       units: [
         { name: 'textInput', rate: 0.35, strategy: 'fixed', unit: 'millionTokens' },
@@ -39,38 +47,6 @@ const cerebrasModels: AIChatModelCard[] = [
     },
     settings: {
       extendParams: ['reasoningEffort'],
-    },
-    type: 'chat',
-  },
-  {
-    abilities: {
-      functionCall: true,
-    },
-    contextWindowTokens: 131_072,
-    displayName: 'Qwen 3 235B Instruct',
-    id: 'qwen-3-235b-a22b-instruct-2507',
-    pricing: {
-      units: [
-        { name: 'textInput', rate: 0.6, strategy: 'fixed', unit: 'millionTokens' },
-        { name: 'textOutput', rate: 1.2, strategy: 'fixed', unit: 'millionTokens' },
-      ],
-    },
-    type: 'chat',
-  },
-  {
-    abilities: {
-      functionCall: true,
-    },
-    contextWindowTokens: 32_768,
-    description:
-      'Llama 3.1 8B: a small, low-latency Llama variant for lightweight online inference and chat.',
-    displayName: 'Llama 3.1 8B',
-    id: 'llama3.1-8b',
-    pricing: {
-      units: [
-        { name: 'textInput', rate: 0.1, strategy: 'fixed', unit: 'millionTokens' },
-        { name: 'textOutput', rate: 0.1, strategy: 'fixed', unit: 'millionTokens' },
-      ],
     },
     type: 'chat',
   },

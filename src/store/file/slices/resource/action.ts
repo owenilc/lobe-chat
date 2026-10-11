@@ -1,290 +1,615 @@
 import debug from 'debug';
 
-import { documentService } from '@/services/document';
-import { fileService } from '@/services/file';
+import { getActiveWorkspaceId } from '@/business/client/hooks/useActiveWorkspaceId';
+import { knowledgeBaseService } from '@/services/knowledgeBase';
 import { resourceService } from '@/services/resource';
-import { type StoreSetter } from '@/store/types';
-import {
-  type CreateResourceParams,
-  type ResourceItem,
-  type UpdateResourceParams,
-} from '@/types/resource';
+import type { StoreSetter } from '@/store/types';
+import { OptimisticEngine } from '@/store/utils/optimisticEngine';
+import type { CreateResourceParams, ResourceItem, UpdateResourceParams } from '@/types/resource';
 
-import { type FileStore } from '../../store';
-import { type ResourceState } from './initialState';
+import type { FileStore } from '../../store';
+import type { ResourceMoveCachePatch, ResourceParentKey } from './hooks';
+import type { ResourceState } from './initialState';
 import { initialResourceState } from './initialState';
-import { ResourceSyncEngine } from './syncEngine';
+import { getResourceQueryKey } from './utils';
 
 const log = debug('resource-manager:action');
 
-let syncEngineInstance: ResourceSyncEngine | null = null;
+interface ResourceStoreState extends Pick<
+  ResourceState,
+  | 'hasMore'
+  | 'isLoadingMore'
+  | 'isSyncing'
+  | 'lastSyncTime'
+  | 'offset'
+  | 'queryParams'
+  | 'resourceList'
+  | 'resourceMap'
+  | 'syncError'
+  | 'syncQueue'
+  | 'syncingIds'
+  | 'total'
+> {}
 
 type Setter = StoreSetter<FileStore>;
-export const createResourceSlice = (set: Setter, get: () => FileStore, _api?: unknown) => ({
-  ...initialResourceState,
-  ...new ResourceActionImpl(set, get, _api),
-});
+
+export const createResourceSlice = (set: Setter, get: () => FileStore, api?: unknown) =>
+  new ResourceActionImpl(set, get, api);
+
+const toError = (error: unknown) => (error instanceof Error ? error : new Error(String(error)));
 
 export class ResourceActionImpl {
   readonly #get: () => FileStore;
+  readonly #resourceStoreHandle: {
+    getState: () => ResourceStoreState;
+    setState: (nextState: ResourceStoreState) => void;
+  };
   readonly #set: Setter;
+  #syncEngine?: OptimisticEngine<ResourceStoreState>;
 
   constructor(set: Setter, get: () => FileStore, _api?: unknown) {
     void _api;
-    this.#set = set;
     this.#get = get;
+    this.#set = set;
+    this.#resourceStoreHandle = {
+      getState: () => {
+        const state = this.#get();
+
+        return {
+          hasMore: state.hasMore,
+          isLoadingMore: state.isLoadingMore,
+          isSyncing: state.isSyncing,
+          lastSyncTime: state.lastSyncTime,
+          offset: state.offset,
+          queryParams: state.queryParams,
+          resourceList: state.resourceList,
+          resourceMap: state.resourceMap,
+          syncError: state.syncError,
+          syncQueue: state.syncQueue,
+          syncingIds: state.syncingIds,
+          total: state.total,
+        };
+      },
+      setState: (nextState) => {
+        this.#set(nextState as Partial<FileStore>, false, 'resourceSyncEngine/setState');
+      },
+    };
   }
 
+  #clearSyncingId = (id: string) => {
+    this.#set(
+      (state) => {
+        if (!state.syncingIds.has(id)) return {};
+
+        const syncingIds = new Set(state.syncingIds);
+        syncingIds.delete(id);
+
+        return { syncingIds };
+      },
+      false,
+      'resource/clearSyncingId',
+    );
+  };
+
+  #clearResourceOptimisticState = (resource: ResourceItem): ResourceItem => {
+    const { _optimistic, ...rest } = resource;
+
+    void _optimistic;
+
+    return rest;
+  };
+
+  #createOptimisticResource = (params: CreateResourceParams, id?: string): ResourceItem => ({
+    _optimistic: {
+      isPending: true,
+      queryKey: getResourceQueryKey(this.#get().queryParams),
+      retryCount: 0,
+    },
+    createdAt: new Date(),
+    fileType: params.fileType,
+    id: id || `temp-resource-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
+    knowledgeBaseId: params.knowledgeBaseId,
+    metadata: params.metadata,
+    name: 'title' in params ? params.title : params.name,
+    parentId: params.parentId,
+    size: 'size' in params ? params.size : 0,
+    sourceType: params.sourceType,
+    updatedAt: new Date(),
+    ...(params.sourceType === 'file'
+      ? {
+          url: params.url,
+          ...(params.visibility !== undefined ? { visibility: params.visibility } : {}),
+        }
+      : {
+          content: params.content,
+          editorData: params.editorData ?? {},
+          slug: params.slug,
+          title: params.title,
+        }),
+  });
+
   #getSyncEngine = () => {
-    if (!syncEngineInstance) {
-      syncEngineInstance = new ResourceSyncEngine(
-        () => {
-          const state = this.#get();
-          return {
-            resourceList: state.resourceList || [],
-            resourceMap: state.resourceMap || new Map(),
-            syncQueue: state.syncQueue || [],
-            syncingIds: state.syncingIds || new Set(),
-          };
-        },
-        (partial) => {
-          this.#set(partial as any, false, 'syncEngine/update');
-        },
-      );
+    if (this.#syncEngine) return this.#syncEngine;
+
+    this.#syncEngine = new OptimisticEngine(this.#resourceStoreHandle, {
+      maxRetries: 1,
+      onMutationError: (_snapshot, error) => {
+        this.#set(
+          {
+            syncError: toError(error),
+          },
+          false,
+          'resourceSyncEngine/error',
+        );
+      },
+      onMutationSuccess: () => {
+        this.#set(
+          {
+            lastSyncTime: new Date(),
+            syncError: undefined,
+          },
+          false,
+          'resourceSyncEngine/success',
+        );
+      },
+      onQueueChange: (snapshots) => {
+        this.#set(
+          {
+            isSyncing: snapshots.some(
+              (item) => item.status === 'pending' || item.status === 'inflight',
+            ),
+            syncQueue: snapshots,
+          },
+          false,
+          'resourceSyncEngine/queueChange',
+        );
+      },
+    });
+
+    return this.#syncEngine;
+  };
+
+  #replaceLocalResource = (targetId: string, resource: ResourceItem) => {
+    const { resourceList, resourceMap } = this.#get();
+    const nextMap = new Map(resourceMap);
+    nextMap.delete(targetId);
+    nextMap.set(resource.id, resource);
+
+    const targetIndex = resourceList.findIndex((item) => item.id === targetId);
+    const nextList = resourceList.filter((item) => item.id !== targetId && item.id !== resource.id);
+    // If the replaced item was already visible, keep the replacement visible too.
+    // This avoids slug-vs-UUID mismatches when queryParams.parentId is a slug
+    // but resource.parentId is a UUID and the parent folder isn't in resourceMap.
+    const shouldInsert = targetIndex !== -1 || this.#isResourceVisibleInCurrentQuery(resource);
+
+    if (shouldInsert) {
+      const insertIndex = targetIndex === -1 ? 0 : Math.min(targetIndex, nextList.length);
+      nextList.splice(insertIndex, 0, resource);
     }
-    return syncEngineInstance;
+
+    this.#set(
+      {
+        resourceList: nextList,
+        resourceMap: nextMap,
+      },
+      false,
+      'resource/replaceLocalResource',
+    );
   };
 
   /**
-   * Clear all resources and reset state
+   * The definite negative to `#isResourceVisibleInCurrentQuery`: that check
+   * says "no" whenever the open folder is addressed by slug and the parent is
+   * not cached, so a create must not gate on it or a fresh load inside a
+   * folder would never show the row it just created. This only reports rows
+   * that certainly belong elsewhere — another library, the root while a folder
+   * is open (or the reverse), or a cached parent whose slug is not the open one.
    */
+  #isResourceOutsideCurrentQuery = (resource: ResourceItem): boolean => {
+    const { queryParams, resourceMap } = this.#get();
+
+    if (!queryParams) return false;
+
+    if (
+      queryParams.libraryId !== undefined &&
+      (resource.knowledgeBaseId ?? undefined) !== queryParams.libraryId
+    ) {
+      return true;
+    }
+
+    const inFolderView = queryParams.parentId != null;
+    if (!inFolderView) return !!resource.parentId;
+    if (!resource.parentId) return true;
+    if (resource.parentId === queryParams.parentId) return false;
+
+    const parentResource = resourceMap.get(resource.parentId);
+    return !!parentResource && parentResource.slug !== queryParams.parentId;
+  };
+
+  #isResourceVisibleInCurrentQuery = (resource: ResourceItem): boolean => {
+    const { queryParams, resourceMap } = this.#get();
+
+    if (!queryParams) return false;
+
+    if (
+      queryParams.libraryId !== undefined &&
+      (resource.knowledgeBaseId ?? undefined) !== queryParams.libraryId
+    ) {
+      return false;
+    }
+
+    const keyword = queryParams.q?.trim().toLowerCase();
+    if (keyword) {
+      const candidate = `${resource.name} ${resource.title ?? ''}`.trim().toLowerCase();
+      if (!candidate.includes(keyword)) return false;
+    }
+
+    if (queryParams.parentId == null) {
+      return (resource.parentId ?? null) === null;
+    }
+
+    if (!resource.parentId) return false;
+    if (resource.parentId === queryParams.parentId) return true;
+
+    const parentResource = resourceMap.get(resource.parentId);
+    return parentResource?.slug === queryParams.parentId;
+  };
+
+  /**
+   * `queryParams.parentId` carries the folder slug from the URL while drop
+   * targets and the sidebar tree address folders by id. Collect both spellings
+   * for a folder from wherever it is already known client-side: the explorer's
+   * own rows, the current folder, or the loaded sidebar nodes. Unknown handles
+   * pass through unchanged; the root is always `null`.
+   */
+  #resolveParentCacheKeys = async (
+    parents: Array<ResourceParentKey | undefined>,
+  ): Promise<ResourceParentKey[]> => {
+    const handles = parents.filter((parent): parent is string => !!parent);
+    if (handles.length === 0) return [null];
+
+    const keys = new Set<string>(handles);
+    const { currentFolderId, queryParams, resourceMap } = this.#get();
+    const currentSlug = queryParams?.parentId ?? null;
+
+    const addFolder = (folder: { id: string; slug?: string | null }) => {
+      keys.add(folder.id);
+      if (folder.slug) keys.add(folder.slug);
+    };
+
+    for (const handle of handles) {
+      const row =
+        resourceMap.get(handle) ?? [...resourceMap.values()].find((item) => item.slug === handle);
+      if (row) addFolder(row);
+
+      if (currentFolderId && (handle === currentFolderId || handle === currentSlug)) {
+        addFolder({ id: currentFolderId, slug: currentSlug });
+      }
+    }
+
+    const { useTreeStore } = await import('@/store/tree');
+    for (const items of Object.values(useTreeStore.getState().children)) {
+      for (const node of items) {
+        if (node.isFolder && (keys.has(node.id) || (node.slug && keys.has(node.slug)))) {
+          addFolder(node);
+        }
+      }
+    }
+
+    return [...keys];
+  };
+
+  #patchLocalResourceEntries = (
+    ids: Set<string>,
+    updater: (resource: ResourceItem) => ResourceItem | null,
+    actionName: string,
+    onComplete?: (draft: ResourceStoreState, meta: { visibleChangedCount: number }) => void,
+  ) => {
+    this.#set(
+      (state) => {
+        if (ids.size === 0) return {};
+
+        const resourceMap = new Map(state.resourceMap);
+        let changed = false;
+        let visibleChangedCount = 0;
+
+        const resourceList = state.resourceList.flatMap((item) => {
+          if (!ids.has(item.id)) return [item];
+
+          const nextItem = updater(resourceMap.get(item.id) ?? item);
+
+          visibleChangedCount += 1;
+          changed = true;
+
+          if (!nextItem) {
+            resourceMap.delete(item.id);
+            return [];
+          }
+
+          resourceMap.set(nextItem.id, nextItem);
+          return [nextItem];
+        });
+
+        for (const id of ids) {
+          if (state.resourceList.some((item) => item.id === id)) continue;
+
+          const existing = resourceMap.get(id);
+          if (!existing) continue;
+
+          const nextItem = updater(existing);
+          changed = true;
+
+          if (!nextItem) {
+            resourceMap.delete(id);
+            continue;
+          }
+
+          resourceMap.set(nextItem.id, nextItem);
+        }
+
+        if (!changed) return {};
+
+        const draft: ResourceStoreState = {
+          ...state,
+          resourceList,
+          resourceMap,
+        };
+
+        onComplete?.(draft, { visibleChangedCount });
+
+        return draft;
+      },
+      false,
+      actionName,
+    );
+  };
+
+  #toPendingResource = (resource: ResourceItem, patch?: Partial<ResourceItem>): ResourceItem => ({
+    ...resource,
+    ...patch,
+    _optimistic: {
+      ...(resource._optimistic || {
+        queryKey: getResourceQueryKey(this.#get().queryParams),
+        retryCount: 0,
+      }),
+      isPending: true,
+    },
+    updatedAt: patch?.updatedAt ?? new Date(),
+  });
+
   clearResources = (): void => {
     this.#set(
       {
-        hasMore: false,
-        offset: 0,
-        queryParams: undefined,
-        resourceList: [],
-        resourceMap: new Map(),
-        syncQueue: [],
-        total: 0,
+        ...initialResourceState,
       },
       false,
-      'clearResources',
+      'resource/clearResources',
     );
   };
 
-  /**
-   * Create a new resource with optimistic update
-   * Returns temp ID for immediate UI feedback
-   */
+  clearCurrentQueryResources = (): void => {
+    this.#set(
+      (state) => {
+        const visibleIds = new Set(state.resourceList.map((item) => item.id));
+        const syncingIds = new Set(
+          Array.from(state.syncingIds).filter((id) => !visibleIds.has(id)),
+        );
+
+        // Preserve off-screen optimistic items from other queries
+        const preservedMap = new Map<string, ResourceItem>();
+        for (const [id, item] of state.resourceMap) {
+          if (!visibleIds.has(id) && item._optimistic) {
+            preservedMap.set(id, item);
+          }
+        }
+
+        return {
+          hasMore: false,
+          offset: 0,
+          resourceList: [],
+          resourceMap: preservedMap,
+          syncingIds,
+          total: 0,
+        };
+      },
+      false,
+      'resource/clearCurrentQueryResources',
+    );
+  };
+
   createResource = async (params: CreateResourceParams): Promise<string> => {
-    const tempId = `temp-resource-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
+    const optimisticResource = this.#createOptimisticResource(params);
+    const syncEngine = this.#getSyncEngine();
+    const tx = syncEngine.createTransaction(`createResource(${optimisticResource.id})`);
+    const showInList = !this.#isResourceOutsideCurrentQuery(optimisticResource);
 
-    // 1. Create optimistic resource
-    const optimisticResource: ResourceItem = {
-      _optimistic: { isPending: true, retryCount: 0 },
-      createdAt: new Date(),
-      fileType: params.fileType,
-      id: tempId,
-      knowledgeBaseId: params.knowledgeBaseId,
-      name: 'title' in params ? params.title : params.name,
-      parentId: params.parentId,
-      size: 'size' in params ? params.size : 0,
-      sourceType: params.sourceType,
-      updatedAt: new Date(),
-      ...(params.sourceType === 'file'
-        ? {
-            url: 'url' in params ? params.url : '',
-          }
-        : {
-            content: 'content' in params ? params.content : '',
-            editorData: 'editorData' in params ? params.editorData : {},
-            slug: 'slug' in params ? params.slug : undefined,
-            title: 'title' in params ? params.title : 'Untitled',
-          }),
-      metadata: params.metadata,
+    tx.set((draft) => {
+      if (showInList) draft.resourceList.unshift(optimisticResource);
+      draft.resourceMap.set(optimisticResource.id, optimisticResource);
+      draft.syncingIds.add(optimisticResource.id);
+    });
+    tx.mutation = () => resourceService.createResource(params);
+    tx.onSuccess = async (result) => {
+      this.#replaceLocalResource(optimisticResource.id, result as ResourceItem);
+      this.#clearSyncingId(optimisticResource.id);
+    };
+    tx.onError = async (error) => {
+      this.#clearSyncingId(optimisticResource.id);
+      this.markLocalResourceError(optimisticResource.id, toError(error));
     };
 
-    // 2. Update store immediately (UI instant feedback)
-    const { resourceMap, resourceList } = this.#get();
-    const newMap = new Map(resourceMap);
-    newMap.set(tempId, optimisticResource);
-
-    this.#set(
-      {
-        resourceList: [optimisticResource, ...resourceList],
-        resourceMap: newMap,
-      },
-      false,
-      'createResource/optimistic',
-    );
-
-    // 3. Enqueue sync (background)
-    const syncEngine = this.#getSyncEngine();
-    syncEngine.enqueue({
-      id: `sync-${tempId}`,
-      payload: params,
-      resourceId: tempId,
-      retryCount: 0,
-      timestamp: new Date(),
-      type: 'create',
+    void tx.commit<ResourceItem>().catch((error) => {
+      console.error('Failed to create resource:', error);
     });
 
-    return tempId;
+    return optimisticResource.id;
   };
 
-  /**
-   * Create a new resource and wait for sync to complete
-   * Returns real ID from server (useful for auto-rename after creation)
-   */
   createResourceAndSync = async (params: CreateResourceParams): Promise<string> => {
-    const tempId = `temp-resource-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
+    const optimisticResource = this.#createOptimisticResource(params);
+    const syncEngine = this.#getSyncEngine();
+    const tx = syncEngine.createTransaction(`createResourceAndSync(${optimisticResource.id})`);
+    // A row created for another folder (sidebar "+" at the root while a folder
+    // is open, a folder row's "+" while the root is open) must not surface in
+    // the list the Explorer is currently showing.
+    const showInList = !this.#isResourceOutsideCurrentQuery(optimisticResource);
 
-    // 1. Create optimistic resource
-    const optimisticResource: ResourceItem = {
-      _optimistic: { isPending: true, retryCount: 0 },
-      createdAt: new Date(),
-      fileType: params.fileType,
-      id: tempId,
-      knowledgeBaseId: params.knowledgeBaseId,
-      name: 'title' in params ? params.title : params.name,
-      parentId: params.parentId,
-      size: 'size' in params ? params.size : 0,
-      sourceType: params.sourceType,
-      updatedAt: new Date(),
-      ...(params.sourceType === 'file'
-        ? {
-            url: 'url' in params ? params.url : '',
-          }
-        : {
-            content: 'content' in params ? params.content : '',
-            editorData: 'editorData' in params ? params.editorData : {},
-            slug: 'slug' in params ? params.slug : undefined,
-            title: 'title' in params ? params.title : 'Untitled',
-          }),
-      metadata: params.metadata,
+    tx.set((draft) => {
+      if (showInList) draft.resourceList.unshift(optimisticResource);
+      draft.resourceMap.set(optimisticResource.id, optimisticResource);
+      draft.syncingIds.add(optimisticResource.id);
+    });
+    tx.mutation = () => resourceService.createResource(params);
+    tx.onSuccess = async (result) => {
+      this.#replaceLocalResource(optimisticResource.id, result as ResourceItem);
+      this.#clearSyncingId(optimisticResource.id);
+    };
+    tx.onError = async (error) => {
+      this.#clearSyncingId(optimisticResource.id);
+      this.markLocalResourceError(optimisticResource.id, toError(error));
     };
 
-    // 2. Update store immediately (UI instant feedback)
-    const { resourceMap, resourceList } = this.#get();
-    const newMap = new Map(resourceMap);
-    newMap.set(tempId, optimisticResource);
-
-    this.#set(
-      {
-        resourceList: [optimisticResource, ...resourceList],
-        resourceMap: newMap,
-      },
-      false,
-      'createResourceAndSync/optimistic',
-    );
-
-    // 3. Enqueue sync and wait for completion
-    const syncEngine = this.#getSyncEngine();
-    const realId = await syncEngine.enqueue({
-      id: `sync-${tempId}`,
-      payload: params,
-      resourceId: tempId,
-      retryCount: 0,
-      timestamp: new Date(),
-      type: 'create',
-    });
-
-    return (realId as string) || tempId;
+    const created = await tx.commit<ResourceItem>();
+    return created.id;
   };
 
-  /**
-   * Delete a resource with optimistic update
-   */
   deleteResource = async (id: string): Promise<void> => {
-    const { resourceList, resourceMap } = this.#get();
-    const newMap = new Map(resourceMap);
-    newMap.delete(id);
-
-    log('deleteResource', id, newMap, resourceList);
-
-    this.#set(
-      {
-        resourceList: resourceList.filter((item) => item.id !== id),
-        resourceMap: newMap,
-      },
-      false,
-      'deleteResource/optimistic',
-    );
-
     const syncEngine = this.#getSyncEngine();
-    await syncEngine.enqueue({
-      id: `sync-${id}-${Date.now()}`,
-      payload: {},
-      resourceId: id,
-      retryCount: 0,
-      timestamp: new Date(),
-      type: 'delete',
-    });
+    const tx = syncEngine.createTransaction(`deleteResource(${id})`);
 
-    log('enqueue deleteResource', id, syncEngine);
+    tx.set((draft) => {
+      draft.resourceList = draft.resourceList.filter((item) => item.id !== id);
+      draft.resourceMap.delete(id);
+    });
+    tx.mutation = () => resourceService.deleteResource(id);
+
+    await tx.commit<void>();
   };
 
   deleteResources = async (ids: string[]) => {
     if (ids.length === 0) return;
 
-    // 1. Read sourceType from resourceMap for each ID (client-side, no API call)
-    const { resourceMap, resourceList } = this.#get();
-    const fileIds: string[] = [];
-    const documentIds: string[] = [];
-
-    for (const id of ids) {
-      const resource = resourceMap.get(id);
-      if (resource?.sourceType === 'document') {
-        documentIds.push(id);
-      } else {
-        fileIds.push(id);
-      }
-    }
-
-    // 2. Optimistically remove all items from store in one set() call
     const idsSet = new Set(ids);
-    const newMap = new Map(resourceMap);
-    for (const id of ids) {
-      newMap.delete(id);
-    }
+    const syncEngine = this.#getSyncEngine();
+    const tx = syncEngine.createTransaction(`deleteResources(${ids.join(',')})`);
+
+    tx.set((draft) => {
+      draft.resourceList = draft.resourceList.filter((item) => !idsSet.has(item.id));
+      for (const id of idsSet) {
+        draft.resourceMap.delete(id);
+      }
+    });
+    tx.mutation = () => resourceService.deleteResources(ids);
+
+    await tx.commit<void>();
+  };
+
+  flushSync = async (): Promise<void> => {
+    await this.#getSyncEngine().flush();
+  };
+
+  insertLocalResource = (params: CreateResourceParams, id?: string): string => {
+    const optimisticResource = this.#createOptimisticResource(params, id);
 
     this.#set(
-      {
-        resourceList: resourceList.filter((r) => !idsSet.has(r.id)),
-        resourceMap: newMap,
+      (state) => {
+        const resourceMap = new Map(state.resourceMap);
+        resourceMap.set(optimisticResource.id, optimisticResource);
+
+        return {
+          resourceList: [optimisticResource, ...state.resourceList],
+          resourceMap,
+        };
       },
       false,
-      'deleteResources/optimistic',
+      'resource/insertLocalResource',
     );
 
-    // 3. Fire batch delete APIs in background (no await — UI already updated)
-    const promises: Promise<void>[] = [];
-    if (fileIds.length > 0) promises.push(fileService.removeFiles(fileIds));
-    if (documentIds.length > 0) promises.push(documentService.deleteDocuments(documentIds));
-
-    Promise.all(promises).catch((error) => {
-      console.error('Failed to delete resources:', error);
-    });
+    return optimisticResource.id;
   };
 
-  /**
-   * Flush pending sync operations immediately
-   */
-  flushSync = async (): Promise<void> => {
-    const syncEngine = this.#getSyncEngine();
-    await syncEngine.flush();
+  patchLocalResource = (
+    id: string,
+    updates: Partial<ResourceItem>,
+    actionName: string = 'resource/patchLocalResource',
+  ): void => {
+    this.#patchLocalResourceEntries(
+      new Set([id]),
+      (resource) => ({
+        ...resource,
+        ...updates,
+      }),
+      actionName,
+    );
   };
 
-  /**
-   * Load more resources (pagination)
-   */
+  patchLocalResourceStatuses = (
+    items: Array<
+      Pick<
+        ResourceItem,
+        | 'id'
+        | 'chunkCount'
+        | 'chunkingError'
+        | 'chunkingStatus'
+        | 'embeddingError'
+        | 'embeddingStatus'
+        | 'finishEmbedding'
+      >
+    >,
+  ): void => {
+    if (items.length === 0) return;
+
+    const statusMap = new Map(items.map((item) => [item.id, item]));
+    const statusByResourceId = new Map<
+      string,
+      Pick<
+        ResourceItem,
+        | 'id'
+        | 'chunkCount'
+        | 'chunkingError'
+        | 'chunkingStatus'
+        | 'embeddingError'
+        | 'embeddingStatus'
+        | 'finishEmbedding'
+      >
+    >();
+
+    for (const resource of this.#get().resourceList) {
+      const status =
+        statusMap.get(resource.id) ?? (resource.fileId && statusMap.get(resource.fileId));
+      if (status) statusByResourceId.set(resource.id, status);
+    }
+
+    this.#patchLocalResourceEntries(
+      new Set(statusByResourceId.keys()),
+      (resource) => {
+        const patch = statusByResourceId.get(resource.id);
+        if (!patch) return resource;
+
+        return {
+          ...resource,
+          chunkCount: patch.chunkCount !== undefined ? patch.chunkCount : resource.chunkCount,
+          chunkingError:
+            patch.chunkingError !== undefined ? patch.chunkingError : resource.chunkingError,
+          chunkingStatus:
+            patch.chunkingStatus !== undefined ? patch.chunkingStatus : resource.chunkingStatus,
+          embeddingError:
+            patch.embeddingError !== undefined ? patch.embeddingError : resource.embeddingError,
+          embeddingStatus:
+            patch.embeddingStatus !== undefined ? patch.embeddingStatus : resource.embeddingStatus,
+          finishEmbedding:
+            patch.finishEmbedding !== undefined ? patch.finishEmbedding : resource.finishEmbedding,
+        };
+      },
+      'resource/patchLocalResourceStatuses',
+    );
+  };
+
   loadMoreResources = async (): Promise<void> => {
-    const { offset, queryParams, hasMore } = this.#get();
+    const { hasMore, offset, queryParams } = this.#get();
     if (!hasMore || !queryParams) return;
 
-    this.#set({ isLoadingMore: true }, false, 'loadMoreResources/start');
+    this.#set({ isLoadingMore: true }, false, 'resource/loadMoreResources/start');
 
     try {
       const { items } = await resourceService.queryResources({
@@ -293,32 +618,71 @@ export class ResourceActionImpl {
         offset,
       });
 
-      const { resourceMap, resourceList } = this.#get();
-      const newMap = new Map(resourceMap);
-      items.forEach((item) => newMap.set(item.id, item));
-
       this.#set(
-        {
-          hasMore: items.length === 50,
-          isLoadingMore: false,
-          offset: offset + items.length,
-          resourceList: [...resourceList, ...items],
-          resourceMap: newMap,
+        (state) => {
+          const existingIds = new Set(state.resourceList.map((item) => item.id));
+          const resourceMap = new Map(state.resourceMap);
+
+          for (const item of items) {
+            resourceMap.set(item.id, item);
+          }
+
+          return {
+            hasMore: items.length === 50,
+            isLoadingMore: false,
+            offset: offset + items.length,
+            resourceList: [
+              ...state.resourceList,
+              ...items.filter((item) => !existingIds.has(item.id)),
+            ],
+            resourceMap,
+          };
         },
         false,
-        'loadMoreResources/success',
+        'resource/loadMoreResources/success',
       );
     } catch (error) {
-      this.#set({ isLoadingMore: false }, false, 'loadMoreResources/error');
+      this.#set({ isLoadingMore: false }, false, 'resource/loadMoreResources/error');
       throw error;
     }
   };
 
-  /**
-   * Move a resource to a different parent folder
-   */
+  markLocalResourceError = (id: string, error: Error): void => {
+    const { resourceMap } = this.#get();
+    const resource = resourceMap.get(id);
+    if (!resource) return;
+
+    const nextResource: ResourceItem = {
+      ...resource,
+      _optimistic: {
+        ...(resource._optimistic || {
+          isPending: false,
+          queryKey: getResourceQueryKey(this.#get().queryParams),
+          retryCount: 0,
+        }),
+        error,
+        isPending: false,
+        lastSyncAttempt: new Date(),
+      },
+    };
+
+    this.#set(
+      (state) => {
+        const resourceMap = new Map(state.resourceMap);
+        resourceMap.set(id, nextResource);
+
+        return {
+          resourceList: state.resourceList.map((item) => (item.id === id ? nextResource : item)),
+          resourceMap,
+        };
+      },
+      false,
+      'resource/markLocalResourceError',
+    );
+  };
+
   moveResource = async (id: string, parentId: string | null): Promise<void> => {
-    const { resourceMap, resourceList } = this.#get();
+    const { queryParams, resourceMap } = this.#get();
     const existing = resourceMap.get(id);
 
     if (!existing) {
@@ -326,81 +690,217 @@ export class ResourceActionImpl {
       return;
     }
 
-    const newMap = new Map(resourceMap);
-    newMap.delete(id);
+    // List rows may omit `parentId`; only a known parent can prove a no-op move.
+    if (existing.parentId !== undefined && (existing.parentId ?? null) === parentId) return;
 
-    this.#set(
-      {
-        resourceList: resourceList.filter((item) => item.id !== id),
-        resourceMap: newMap,
-      },
-      false,
-      'moveResource/optimistic',
+    // The row lives in the current explorer list, so the current query's
+    // parent names the source folder even when the row itself omits `parentId`.
+    const cachePatch = await this.prepareResourceMoveCachePatch(
+      [existing.parentId, queryParams?.parentId ?? null],
+      parentId,
     );
 
     const syncEngine = this.#getSyncEngine();
-    await syncEngine.enqueue({
-      id: `sync-move-${id}-${Date.now()}`,
-      payload: { parentId },
-      resourceId: id,
-      retryCount: 0,
-      timestamp: new Date(),
-      type: 'move',
-    });
-  };
-
-  /**
-   * Retry a failed sync operation
-   */
-  retrySync = async (resourceId: string): Promise<void> => {
-    const { resourceMap } = this.#get();
-    const resource = resourceMap.get(resourceId);
-
-    if (resource?._optimistic?.error) {
-      const updated: ResourceItem = {
-        ...resource,
-        _optimistic: {
-          isPending: true,
+    const tx = syncEngine.createTransaction(`moveResource(${id})`);
+    const movedResource: ResourceItem = {
+      ...existing,
+      _optimistic: {
+        ...(existing._optimistic || {
+          queryKey: getResourceQueryKey(this.#get().queryParams),
           retryCount: 0,
-        },
-      };
+        }),
+        isPending: true,
+      },
+      parentId,
+      updatedAt: new Date(),
+    };
+    const shouldKeepVisible = !queryParams || this.#isResourceVisibleInCurrentQuery(movedResource);
 
-      const newMap = new Map(resourceMap);
-      newMap.set(resourceId, updated);
-
-      const { resourceList } = this.#get();
-      const listIndex = resourceList.findIndex((item) => item.id === resourceId);
-      const newList = [...resourceList];
-      if (listIndex >= 0) {
-        newList[listIndex] = updated;
+    tx.set((draft) => {
+      if (shouldKeepVisible) {
+        draft.resourceMap.set(id, movedResource);
+        draft.resourceList = draft.resourceList.map((item) =>
+          item.id === id ? movedResource : item,
+        );
+        return;
       }
 
-      this.#set(
-        {
-          resourceList: newList,
-          resourceMap: newMap,
-        },
-        false,
-        'retrySync',
-      );
+      draft.resourceList = draft.resourceList.filter((item) => item.id !== id);
+      draft.resourceMap.delete(id);
+    });
+    tx.mutation = () => resourceService.moveResource(id, parentId, existing);
+    tx.onSuccess = async (result) => {
+      const moved = result as ResourceItem;
+      if (shouldKeepVisible) this.#replaceLocalResource(id, moved);
 
-      const syncEngine = this.#getSyncEngine();
-      syncEngine.enqueue({
-        id: `sync-retry-${resourceId}-${Date.now()}`,
-        payload: {},
-        resourceId,
-        retryCount: 0,
-        timestamp: new Date(),
-        type: 'update',
-      });
-    }
+      await this.applyMovedResourceToCaches(moved, cachePatch);
+    };
+
+    await tx.commit<ResourceItem>();
   };
 
   /**
-   * Update a resource with optimistic update
+   * Everything a completed move needs to patch the SWR folder-list caches,
+   * gathered *before* the request goes out: the workspace / library the move
+   * is issued from, and both folders widened to every key the explorer may
+   * query them by (`queryParams.parentId` carries the URL slug while drop
+   * targets and the sidebar tree address folders by id). The user may switch
+   * scope while the request is in flight, after which neither the scope nor
+   * the old folders' slug aliases can be read from the store any more.
+   *
+   * Callers pass whatever handle they hold for each folder — a drop target
+   * id, a URL slug or an empty root.
    */
+  prepareResourceMoveCachePatch = async (
+    fromParent: ResourceParentKey | undefined | Array<ResourceParentKey | undefined>,
+    toParent: ResourceParentKey | undefined | Array<ResourceParentKey | undefined>,
+  ): Promise<ResourceMoveCachePatch> => {
+    const scope = {
+      libraryId: this.#get().queryParams?.libraryId,
+      workspaceId: getActiveWorkspaceId(),
+    };
+    const [fromParentKeys, toParentKeys] = await Promise.all([
+      this.#resolveParentCacheKeys(Array.isArray(fromParent) ? fromParent : [fromParent]),
+      this.#resolveParentCacheKeys(Array.isArray(toParent) ? toParent : [toParent]),
+    ]);
+
+    return { fromParentKeys, scope, toParentKeys };
+  };
+
+  /**
+   * Mirror a completed move into the SWR folder-list caches so the destination
+   * (and source) folder show the moved row on their next visit instead of the
+   * cached pre-move list. `patch` comes from `prepareResourceMoveCachePatch`,
+   * taken before the request.
+   */
+  applyMovedResourceToCaches = async (
+    resource: ResourceItem,
+    patch: ResourceMoveCachePatch,
+  ): Promise<void> => {
+    const { applyResourceMoveToListCaches } = await import('./hooks');
+    await applyResourceMoveToListCaches(resource, patch);
+  };
+
+  removeLocalResource = (id: string): void => {
+    this.#set(
+      (state) => {
+        const resourceMap = new Map(state.resourceMap);
+        resourceMap.delete(id);
+
+        return {
+          resourceList: state.resourceList.filter((item) => item.id !== id),
+          resourceMap,
+        };
+      },
+      false,
+      'resource/removeLocalResource',
+    );
+  };
+
+  replaceLocalResource = (tempId: string, resource: ResourceItem): void => {
+    this.#replaceLocalResource(tempId, resource);
+  };
+
+  retrySync = async (): Promise<void> => {
+    await this.flushSync();
+  };
+
+  addResourcesToKnowledgeBase = async (knowledgeBaseId: string, ids: string[]): Promise<void> => {
+    if (ids.length === 0) return;
+
+    const idsSet = new Set(ids);
+    const syncEngine = this.#getSyncEngine();
+    const tx = syncEngine.createTransaction(`addResourcesToKnowledgeBase(${knowledgeBaseId})`);
+
+    tx.set((draft) => {
+      for (const item of draft.resourceList) {
+        if (!idsSet.has(item.id)) continue;
+
+        const nextItem = this.#toPendingResource(item, { knowledgeBaseId });
+        draft.resourceMap.set(item.id, nextItem);
+      }
+
+      draft.resourceList = draft.resourceList.map((item) => {
+        if (!idsSet.has(item.id)) return item;
+        return draft.resourceMap.get(item.id) ?? item;
+      });
+    });
+    tx.mutation = () => knowledgeBaseService.addFilesToKnowledgeBase(knowledgeBaseId, ids);
+    tx.onSuccess = async () => {
+      this.#patchLocalResourceEntries(
+        idsSet,
+        (resource) => this.#clearResourceOptimisticState({ ...resource, knowledgeBaseId }),
+        'resource/addResourcesToKnowledgeBase/success',
+      );
+    };
+
+    await tx.commit<void>();
+  };
+
+  removeResourcesFromKnowledgeBase = async (
+    knowledgeBaseId: string,
+    ids: string[],
+  ): Promise<void> => {
+    if (ids.length === 0) return;
+
+    const idsSet = new Set(ids);
+    const isKnowledgeBaseView = this.#get().queryParams?.libraryId === knowledgeBaseId;
+    const syncEngine = this.#getSyncEngine();
+    const tx = syncEngine.createTransaction(`removeResourcesFromKnowledgeBase(${knowledgeBaseId})`);
+
+    tx.set((draft) => {
+      if (isKnowledgeBaseView) {
+        let visibleChangedCount = 0;
+
+        draft.resourceList = draft.resourceList.filter((item) => {
+          if (!idsSet.has(item.id)) return true;
+
+          draft.resourceMap.delete(item.id);
+          visibleChangedCount += 1;
+          return false;
+        });
+
+        if (typeof draft.total === 'number') {
+          draft.total = Math.max(0, draft.total - ids.length);
+          draft.hasMore = draft.total > draft.resourceList.length;
+        }
+
+        draft.offset = Math.max(0, draft.offset - visibleChangedCount);
+        return;
+      }
+
+      for (const item of draft.resourceList) {
+        if (!idsSet.has(item.id)) continue;
+
+        const nextItem = this.#toPendingResource(item, { knowledgeBaseId: undefined });
+        draft.resourceMap.set(item.id, nextItem);
+      }
+
+      draft.resourceList = draft.resourceList.map((item) => {
+        if (!idsSet.has(item.id)) return item;
+        return draft.resourceMap.get(item.id) ?? item;
+      });
+    });
+    tx.mutation = () => knowledgeBaseService.removeFilesFromKnowledgeBase(knowledgeBaseId, ids);
+    tx.onSuccess = async () => {
+      if (isKnowledgeBaseView) return;
+
+      this.#patchLocalResourceEntries(
+        idsSet,
+        (resource) =>
+          this.#clearResourceOptimisticState({
+            ...resource,
+            knowledgeBaseId: undefined,
+          }),
+        'resource/removeResourcesFromKnowledgeBase/success',
+      );
+    };
+
+    await tx.commit<void>();
+  };
+
   updateResource = async (id: string, updates: UpdateResourceParams): Promise<void> => {
-    const { resourceMap, resourceList } = this.#get();
+    const { resourceMap } = this.#get();
     const existing = resourceMap.get(id);
 
     if (!existing) {
@@ -408,47 +908,36 @@ export class ResourceActionImpl {
       return;
     }
 
-    log('updateResource', id, existing, updates);
-
     const updated: ResourceItem = {
       ...existing,
       ...updates,
-      _optimistic: { isPending: true, retryCount: 0 },
+      _optimistic: {
+        ...(existing._optimistic || {
+          queryKey: getResourceQueryKey(this.#get().queryParams),
+          retryCount: 0,
+        }),
+        isPending: true,
+      },
       name: updates.name || updates.title || existing.name,
       updatedAt: new Date(),
     };
 
-    const newMap = new Map(resourceMap);
-    newMap.set(id, updated);
-
-    const listIndex = resourceList.findIndex((item) => item.id === id);
-    const newList = [...resourceList];
-    if (listIndex >= 0) {
-      newList[listIndex] = updated;
-    }
-
-    this.#set(
-      {
-        resourceList: newList,
-        resourceMap: newMap,
-      },
-      false,
-      'updateResource/optimistic',
-    );
+    log('updateResource', id, existing, updates);
 
     const syncEngine = this.#getSyncEngine();
-    syncEngine.enqueue({
-      id: `sync-${id}-${Date.now()}`,
-      payload: updates,
-      resourceId: id,
-      retryCount: 0,
-      timestamp: new Date(),
-      type: 'update',
-    });
+    const tx = syncEngine.createTransaction(`updateResource(${id})`);
 
-    log('enqueue updateResource', id, syncEngine);
+    tx.set((draft) => {
+      draft.resourceMap.set(id, updated);
+      draft.resourceList = draft.resourceList.map((item) => (item.id === id ? updated : item));
+    });
+    tx.mutation = () => resourceService.updateResource(id, updates);
+    tx.onSuccess = async (result) => {
+      this.#replaceLocalResource(id, result as ResourceItem);
+    };
+
+    await tx.commit<ResourceItem>();
   };
 }
 
 export type ResourceAction = Pick<ResourceActionImpl, keyof ResourceActionImpl>;
-export type ResourceSlice = ResourceAction & ResourceState;

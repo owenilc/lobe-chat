@@ -1,21 +1,21 @@
-import { zValidator } from '@hono/zod-validator';
 import { Hono } from 'hono';
 
 import { getAllScopePermissions } from '@/utils/rbac';
 
+import { zValidator } from '../common/validator';
 import { MessageTranslationController } from '../controllers';
 import { requireAuth } from '../middleware';
-import { requireAnyPermission } from '../middleware/permission-check';
+import { requireAnyPermission, requireApiKeyScope } from '../middleware/permission-check';
 import {
   MessageTranslateInfoUpdateSchema,
   MessageTranslateQueryRequestSchema,
   MessageTranslateTriggerRequestSchema,
 } from '../types/message-translations.type';
 
-// Message Translate 相关路由
+// Message Translate related routes
 const MessageTranslationRoutes = new Hono();
 
-// POST /api/v1/message-translates - 翻译指定消息
+// POST /api/v1/message-translates - Translate specified message
 MessageTranslationRoutes.post(
   '/:messageId',
   requireAuth,
@@ -27,6 +27,8 @@ MessageTranslationRoutes.post(
     getAllScopePermissions('TRANSLATION_CREATE'),
     'You do not have permission to translate message',
   ),
+  // Translation invokes a model, so restricted API keys also need `model:invoke`
+  requireApiKeyScope('model:invoke'),
   zValidator('param', MessageTranslateQueryRequestSchema),
   zValidator('json', MessageTranslateTriggerRequestSchema),
   (c) => {
@@ -35,7 +37,7 @@ MessageTranslationRoutes.post(
   },
 );
 
-// GET /api/v1/message-translates - 获取指定消息的翻译信息
+// GET /api/v1/message-translates - Get translation info for specified message
 MessageTranslationRoutes.get(
   '/:messageId',
   requireAuth,
@@ -54,7 +56,7 @@ MessageTranslationRoutes.get(
   },
 );
 
-// PUT /api/v1/message-translates/:messageId - 更新消息翻译信息
+// PUT /api/v1/message-translates/:messageId - Update message translation info
 MessageTranslationRoutes.patch(
   '/:messageId',
   requireAuth,
@@ -74,7 +76,7 @@ MessageTranslationRoutes.patch(
   },
 );
 
-// DELETE /api/v1/message-translates/:messageId - 删除消息翻译信息
+// DELETE /api/v1/message-translates/:messageId - Delete message translation info
 MessageTranslationRoutes.delete(
   '/:messageId',
   requireAuth,

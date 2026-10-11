@@ -1,3 +1,4 @@
+import { RequestTrigger } from '@lobechat/types';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -13,6 +14,14 @@ vi.mock('@/libs/swr', async () => {
   const actual = await vi.importActual('@/libs/swr');
   return {
     ...actual,
+    mutate: vi.fn(),
+  };
+});
+
+vi.mock('swr', async () => {
+  const actual = await vi.importActual('swr');
+  return {
+    ...(actual as any),
     mutate: vi.fn(),
   };
 });
@@ -48,7 +57,7 @@ vi.mock('@/store/user/selectors', () => ({
     }),
   },
   userGeneralSettingsSelectors: {
-    responseLanguage: vi.fn(() => undefined),
+    currentResponseLanguage: vi.fn(() => 'en-US'),
   },
 }));
 
@@ -58,6 +67,7 @@ beforeEach(() => {
     generationTopics: [],
     activeGenerationTopicId: null,
     loadingGenerationTopicIds: [],
+    newGenerationTopicVisibility: 'private',
   });
 });
 
@@ -66,6 +76,24 @@ afterEach(() => {
 });
 
 describe('GenerationTopicAction', () => {
+  describe('setNewGenerationTopicVisibility', () => {
+    it('should default new generation topics to private visibility', () => {
+      const { result } = renderHook(() => useImageStore());
+
+      expect(result.current.newGenerationTopicVisibility).toBe('private');
+    });
+
+    it('should update new generation topic visibility', () => {
+      const { result } = renderHook(() => useImageStore());
+
+      act(() => {
+        result.current.setNewGenerationTopicVisibility('public');
+      });
+
+      expect(result.current.newGenerationTopicVisibility).toBe('public');
+    });
+  });
+
   describe('createGenerationTopic', () => {
     it('should create a new topic and auto-generate title from prompts', async () => {
       const { result } = renderHook(() => useImageStore());
@@ -90,7 +118,7 @@ describe('GenerationTopicAction', () => {
       });
 
       expect(createdTopicId).toBe(newTopicId);
-      expect(generationTopicService.createTopic).toHaveBeenCalled();
+      expect(generationTopicService.createTopic).toHaveBeenCalledWith('image', 'private');
       expect(summaryTopicTitleSpy).toHaveBeenCalledWith(newTopicId, prompts);
     });
 
@@ -226,7 +254,9 @@ describe('GenerationTopicAction', () => {
         await result.current.summaryGenerationTopicTitle(topicId, prompts);
       });
 
-      expect(chatService.fetchPresetTaskResult).toHaveBeenCalled();
+      expect(chatService.fetchPresetTaskResult).toHaveBeenCalledWith(
+        expect.objectContaining({ trigger: RequestTrigger.GenerationTopicTitle }),
+      );
       expect(generationTopicService.updateTopic).toHaveBeenCalledWith(topicId, {
         title: generatedTitle,
       });
@@ -409,10 +439,8 @@ describe('GenerationTopicAction', () => {
 
       vi.mocked(generationTopicService.getAllGenerationTopics).mockResolvedValue(topics);
 
-      let hookResult: any;
-
       await act(async () => {
-        const { result } = renderHook(() => {
+        renderHook(() => {
           const store = useImageStore();
           // Actually call the SWR hook to trigger the service call
           const swrResult = store.useFetchGenerationTopics(true);
@@ -424,8 +452,6 @@ describe('GenerationTopicAction', () => {
 
           return swrResult;
         });
-
-        hookResult = result;
       });
 
       // Wait for service to be called and state to be updated
@@ -444,16 +470,6 @@ describe('GenerationTopicAction', () => {
   });
 
   describe('refreshGenerationTopics', () => {
-    beforeEach(() => {
-      vi.mock('swr', async () => {
-        const actual = await vi.importActual('swr');
-        return {
-          ...(actual as any),
-          mutate: vi.fn(),
-        };
-      });
-    });
-
     afterEach(() => {
       vi.resetAllMocks();
     });
@@ -465,7 +481,7 @@ describe('GenerationTopicAction', () => {
         await result.current.refreshGenerationTopics();
       });
 
-      expect(mutate).toHaveBeenCalledWith(['fetchGenerationTopics']);
+      expect(mutate).toHaveBeenCalledWith(['image:generationTopics']);
     });
   });
 
@@ -609,7 +625,25 @@ describe('GenerationTopicAction', () => {
       expect(dispatchSpy).toHaveBeenCalled();
       expect(loadingSpy).toHaveBeenCalledWith(expect.any(String), true);
       expect(loadingSpy).toHaveBeenCalledWith(newTopicId, false);
-      expect(generationTopicService.createTopic).toHaveBeenCalled();
+      expect(generationTopicService.createTopic).toHaveBeenCalledWith('image', 'private');
+    });
+
+    it('should create topic with selected public visibility', async () => {
+      const { result } = renderHook(() => useImageStore());
+      const newTopicId = 'gt_public_topic';
+
+      vi.mocked(generationTopicService.createTopic).mockResolvedValue(newTopicId);
+
+      act(() => {
+        result.current.setNewGenerationTopicVisibility('public');
+      });
+
+      await act(async () => {
+        const topicId = await result.current.internal_createGenerationTopic();
+        expect(topicId).toBe(newTopicId);
+      });
+
+      expect(generationTopicService.createTopic).toHaveBeenCalledWith('image', 'public');
     });
   });
 

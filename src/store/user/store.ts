@@ -4,7 +4,9 @@ import { createWithEqualityFn } from 'zustand/traditional';
 import { type StateCreator } from 'zustand/vanilla';
 
 import { createDevtools } from '../middleware/createDevtools';
+import { expose } from '../middleware/expose';
 import { flattenActions } from '../utils/flattenActions';
+import { type ResetableStore, ResetableStoreAction } from '../utils/resetableStore';
 import { type UserState } from './initialState';
 import { initialState } from './initialState';
 import { type UserAuthAction } from './slices/auth/action';
@@ -17,6 +19,8 @@ import { type PreferenceAction } from './slices/preference/action';
 import { createPreferenceSlice } from './slices/preference/action';
 import { type UserSettingsAction } from './slices/settings/action';
 import { createSettingsSlice } from './slices/settings/action';
+import { type WorkspaceUserSettingsAction } from './slices/workspaceUserSettings/action';
+import { createWorkspaceUserSettingsSlice } from './slices/workspaceUserSettings/action';
 
 //  ===============  Aggregate createStoreFn ============ //
 
@@ -25,13 +29,21 @@ export type UserStore = UserState &
   PreferenceAction &
   UserAuthAction &
   CommonAction &
-  OnboardingAction;
+  OnboardingAction &
+  WorkspaceUserSettingsAction &
+  ResetableStore;
 
 type UserStoreAction = UserSettingsAction &
   PreferenceAction &
   UserAuthAction &
   CommonAction &
-  OnboardingAction;
+  OnboardingAction &
+  WorkspaceUserSettingsAction &
+  ResetableStore;
+
+class UserStoreResetAction extends ResetableStoreAction<UserStore> {
+  protected readonly resetActionName = 'resetUserStore';
+}
 
 const createStore: StateCreator<UserStore, [['zustand/devtools', never]]> = (
   ...parameters: Parameters<StateCreator<UserStore, [['zustand/devtools', never]]>>
@@ -43,6 +55,8 @@ const createStore: StateCreator<UserStore, [['zustand/devtools', never]]> = (
     createAuthSlice(...parameters),
     createCommonSlice(...parameters),
     createOnboardingSlice(...parameters),
+    createWorkspaceUserSettingsSlice(...parameters),
+    new UserStoreResetAction(...parameters),
   ]),
 });
 
@@ -54,5 +68,7 @@ export const useUserStore = createWithEqualityFn<UserStore>()(
   subscribeWithSelector(devtools(createStore)),
   shallow,
 );
+
+expose('user', useUserStore);
 
 export const getUserStoreState = () => useUserStore.getState();

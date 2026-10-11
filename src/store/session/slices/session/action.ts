@@ -1,16 +1,18 @@
-import { getSingletonAnalyticsOptional } from '@lobehub/analytics';
+import { toast } from '@lobehub/ui/base-ui';
 import isEqual from 'fast-deep-equal';
 import { t } from 'i18next';
 import { type SWRResponse } from 'swr';
 import useSWR from 'swr';
 import { type PartialDeep } from 'type-fest';
 
-import { message } from '@/components/AntdStaticMethods';
 import { DEFAULT_AGENT_LOBE_SESSION, INBOX_SESSION_ID } from '@/const/session';
+import { analyticsClient } from '@/libs/analytics/client';
 import { mutate, useClientDataSWR } from '@/libs/swr';
+import { sessionKeys } from '@/libs/swr/keys';
 import { chatGroupService } from '@/services/chatGroup';
 import { sessionService } from '@/services/session';
 import { getChatGroupStoreState } from '@/store/agentGroup';
+import { evictMessageCache } from '@/store/chat/utils/evictMessageCache';
 import { type SessionStore } from '@/store/session';
 import { type StoreSetter } from '@/store/types';
 import { getUserStoreState, useUserStore } from '@/store/user';
@@ -33,9 +35,6 @@ import { sessionMetaSelectors } from './selectors/meta';
 
 const n = setNamespace('session');
 
-const FETCH_SESSIONS_KEY = 'fetchSessions';
-const SEARCH_SESSIONS_KEY = 'searchSessions';
-
 type Setter = StoreSetter<SessionStore>;
 export const createSessionSlice = (set: Setter, get: () => SessionStore, _api?: unknown) =>
   new SessionActionImpl(set, get, _api);
@@ -50,15 +49,11 @@ export class SessionActionImpl {
     this.#get = get;
   }
 
-  clearSessions = async (): Promise<void> => {
-    await sessionService.removeAllSessions();
-    await this.#get().refreshSessions();
-  };
-
   closeAllAgentsDrawer = (): void => {
     this.#set({ allAgentsDrawerOpen: false }, false, n('closeAllAgentsDrawer'));
   };
 
+  /** @deprecated Use agentStore.createAgent instead */
   createSession = async (
     agent?: PartialDeep<LobeAgentSession>,
     isSwitchSession: boolean = true,
@@ -76,22 +71,17 @@ export class SessionActionImpl {
     const id = await sessionService.createSession(LobeSessionType.Agent, newSession);
     await refreshSessions();
 
-    // Track new agent creation analytics
-    const analytics = getSingletonAnalyticsOptional();
-    if (analytics) {
-      const userStore = getUserStoreState();
-      const userId = userProfileSelectors.userId(userStore);
+    const userId = userProfileSelectors.userId(getUserStoreState());
 
-      analytics.track({
-        name: 'new_agent_created',
-        properties: {
-          assistant_name: newSession.meta?.title || 'Untitled Agent',
-          assistant_tags: newSession.meta?.tags || [],
-          session_id: id,
-          user_id: userId || 'anonymous',
-        },
-      });
-    }
+    void analyticsClient.track({
+      name: 'new_agent_created',
+      properties: {
+        assistant_name: newSession.meta?.title || 'Untitled Agent',
+        assistant_tags: newSession.meta?.tags || [],
+        session_id: id,
+        user_id: userId || 'anonymous',
+      },
+    });
 
     // Whether to goto  to the new session after creation, the default is to switch to
     if (isSwitchSession) switchSession(id);
@@ -108,26 +98,20 @@ export class SessionActionImpl {
 
     const newTitle = t('duplicateSession.title', { ns: 'chat', title });
 
-    const messageLoadingKey = 'duplicateSession.loading';
-
-    message.loading({
-      content: t('duplicateSession.loading', { ns: 'chat' }),
-      duration: 0,
-      key: messageLoadingKey,
-    });
+    const loadingToast = toast.loading(t('duplicateSession.loading', { ns: 'chat' }));
 
     const newId = await sessionService.cloneSession(id, newTitle);
 
     // duplicate Session Error
     if (!newId) {
-      message.destroy(messageLoadingKey);
-      message.error(t('copyFail', { ns: 'common' }));
+      loadingToast.close();
+      toast.error(t('copyFail', { ns: 'common' }));
       return;
     }
 
     await refreshSessions();
-    message.destroy(messageLoadingKey);
-    message.success(t('duplicateSession.success', { ns: 'chat' }));
+    loadingToast.close();
+    toast.success(t('duplicateSession.success', { ns: 'chat' }));
 
     switchSession(newId);
   };
@@ -140,9 +124,21 @@ export class SessionActionImpl {
     await this.#get().internal_updateSession(id, { pinned });
   };
 
+  /**
+   * @deprecated Legacy session-store delete path, kept only for the mobile
+   * session list (`(mobile)/.../SessionListContent/List/Item/Actions.tsx`).
+   * Desktop already deletes via `HomeStore.removeAgent`. New call sites must use
+   * `HomeStore.removeAgent` (agents) / `HomeStore.removeAgentGroup` (groups) —
+   * all three evict the message cache, so behaviour is equivalent apart from this
+   * path also switching to the inbox when the active session is removed. Remove
+   * once the mobile session list migrates to the agent store.
+   */
   removeSession = async (sessionId: string): Promise<void> => {
     await sessionService.removeSession(sessionId);
     await this.#get().refreshSessions();
+    // deleting an agent cascade-deletes its topics + messages on the server; drop
+    // their message cache too so it doesn't orphan in IndexedDB (never expires)
+    void evictMessageCache((ctx) => ctx.agentId === sessionId);
 
     // If the active session deleted, switch to the inbox session
     if (sessionId === this.#get().activeId) {
@@ -202,7 +198,7 @@ export class SessionActionImpl {
     isLogin: boolean | undefined,
   ): SWRResponse<ChatSessionList> => {
     return useClientDataSWR<ChatSessionList>(
-      enabled ? [FETCH_SESSIONS_KEY, isLogin] : null,
+      enabled ? sessionKeys.list(isLogin) : null,
       () => sessionService.getGroupedSessions(),
       {
         fallbackData: {
@@ -233,6 +229,8 @@ export class SessionActionImpl {
               config: null,
               content: null,
               createdAt: session.createdAt,
+              deletedAt: null,
+              isDeleted: null,
               description: session.meta?.description || '',
               editorData: null,
 
@@ -250,6 +248,8 @@ export class SessionActionImpl {
               title: session.meta?.title || 'Untitled Group',
               updatedAt: session.updatedAt,
               userId: '', // Use updatedAt as accessedAt fallback
+              visibility: 'public' as const,
+              workspaceId: null,
             }));
 
             chatGroupStore.internal_updateGroupMaps(chatGroups);
@@ -261,14 +261,13 @@ export class SessionActionImpl {
             n('useFetchSessions/onSuccess', data),
           );
         },
-        suspense: true,
       },
     );
   };
 
   useSearchSessions = (keyword?: string): SWRResponse<any> => {
     return useSWR<LobeSessions>(
-      [SEARCH_SESSIONS_KEY, keyword],
+      sessionKeys.search(keyword),
       async () => {
         if (!keyword) return [];
 
@@ -318,7 +317,7 @@ export class SessionActionImpl {
   };
 
   refreshSessions = async (): Promise<void> => {
-    await mutate([FETCH_SESSIONS_KEY, true]);
+    await mutate(sessionKeys.list(true));
   };
 }
 

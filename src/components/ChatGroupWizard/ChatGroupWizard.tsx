@@ -1,20 +1,7 @@
 'use client';
 
-import {
-  Avatar,
-  Button,
-  Checkbox,
-  Collapse,
-  Empty,
-  Flexbox,
-  List,
-  Modal,
-  SearchBar,
-  stopPropagation,
-  Text,
-  Tooltip,
-} from '@lobehub/ui';
-import { Switch } from 'antd';
+import { Empty, Flexbox, SearchBar, stopPropagation, Tooltip } from '@lobehub/ui';
+import { Accordion, Avatar, Button, Checkbox, List, Switch, Text } from '@lobehub/ui/base-ui';
 import { createStaticStyles, cssVar, cx } from 'antd-style';
 import { omit } from 'es-toolkit/compat';
 import { Users } from 'lucide-react';
@@ -22,6 +9,7 @@ import { type ChangeEvent } from 'react';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import ImperativeModal from '@/components/ImperativeModal';
 import { DEFAULT_AVATAR } from '@/const/meta';
 import GroupAvatar from '@/features/GroupAvatar';
 import ModelSelect from '@/features/ModelSelect';
@@ -223,10 +211,7 @@ const ChatGroupWizard = memo<ChatGroupWizardProps>(
       [agentSessions],
     );
 
-    const memberDescriptionClass = useMemo(
-      () => cx(styles.description, styles.memberDescription),
-      [cx, styles.description, styles.memberDescription],
-    );
+    const memberDescriptionClass = cx(styles.description, styles.memberDescription);
 
     const defaultModel = useMemo(() => {
       if (enabledModels.length > 0 && enabledModels[0].children.length > 0) {
@@ -286,7 +271,7 @@ const ChatGroupWizard = memo<ChatGroupWizardProps>(
       setSelectedAgents((prev) => prev.filter((id) => id !== agentId));
     }, []);
 
-    const handleReset = () => {
+    const handleReset = useCallback(() => {
       setSelectedTemplate('');
       setSelectedAgents([]);
       setInputValue('');
@@ -299,7 +284,7 @@ const ChatGroupWizard = memo<ChatGroupWizardProps>(
       if (debounceTimerRef.current) {
         clearTimeout(debounceTimerRef.current);
       }
-    };
+    }, [defaultModel]);
 
     const handleHostModelChange = useCallback((config: { model?: string; provider?: string }) => {
       setHostModelConfig(config);
@@ -373,10 +358,8 @@ const ChatGroupWizard = memo<ChatGroupWizardProps>(
       );
     }, [visibleAgentSessions]);
 
-    const handlePanelChange = useCallback((key: string | string[]) => {
-      if (!key) return;
-
-      const nextKey = Array.isArray(key) ? key[0] : key;
+    const handlePanelChange = useCallback((keys: string[]) => {
+      const nextKey = keys[0];
 
       if (nextKey === 'templates' || nextKey === 'agents') {
         setActivePanel(nextKey);
@@ -471,8 +454,8 @@ const ChatGroupWizard = memo<ChatGroupWizardProps>(
               </Tooltip>
             ) : null,
             key: agentId,
+            label: title,
             showAction: true,
-            title,
           };
         })
 
@@ -504,7 +487,7 @@ const ChatGroupWizard = memo<ChatGroupWizardProps>(
       } catch (error) {
         console.error('Failed to create group from template:', error);
       }
-    }, [selectedTemplate, onCreateFromTemplate, groupTemplates, removedMembers]);
+    }, [selectedTemplate, onCreateFromTemplate, groupTemplates, removedMembers, handleReset]);
 
     const handleCustomConfirm = useCallback(async () => {
       if (selectedAgents.length === 0) return;
@@ -519,7 +502,7 @@ const ChatGroupWizard = memo<ChatGroupWizardProps>(
       } finally {
         setIsCreatingCustom(false);
       }
-    }, [selectedAgents, onCreateCustom, onCancel]);
+    }, [selectedAgents, onCreateCustom, onCancel, handleReset]);
 
     const handleConfirm = useCallback(async () => {
       if (selectedTemplate) {
@@ -542,7 +525,7 @@ const ChatGroupWizard = memo<ChatGroupWizardProps>(
     const confirmLoading = selectedTemplate ? isCreatingFromTemplate : isCreatingCustom;
 
     return (
-      <Modal
+      <ImperativeModal
         open={open}
         title={t('groupWizard.title')}
         width={900}
@@ -572,13 +555,11 @@ const ChatGroupWizard = memo<ChatGroupWizardProps>(
               onChange={handleSearchChange}
             />
             <Flexbox flex={1} style={{ overflowY: 'auto', padding: `0 ${cssVar.paddingSM}` }}>
-              <Collapse
-                accordion
-                collapsible
-                activeKey={activePanel}
-                expandIconPlacement="end"
+              <Accordion
                 gap={12}
-                size="small"
+                indicatorPlacement="end"
+                multiple={false}
+                value={[activePanel]}
                 variant="borderless"
                 items={[
                   {
@@ -609,7 +590,7 @@ const ChatGroupWizard = memo<ChatGroupWizardProps>(
                         </Flexbox>
                       ),
                     key: 'templates',
-                    label: t('groupWizard.useTemplate'),
+                    title: t('groupWizard.useTemplate'),
                   },
                   {
                     children:
@@ -639,17 +620,13 @@ const ChatGroupWizard = memo<ChatGroupWizardProps>(
                         </Flexbox>
                       ),
                     key: 'agents',
-                    label: t('groupWizard.existingMembers'),
+                    title: t('groupWizard.existingMembers'),
                   },
                 ]}
                 styles={{
-                  header: {
-                    color: cssVar.colorTextDescription,
-                    fontSize: cssVar.fontSize,
-                    padding: 0,
-                  },
+                  header: { color: cssVar.colorTextDescription, fontSize: cssVar.fontSize },
                 }}
-                onChange={handlePanelChange}
+                onValueChange={handlePanelChange}
               />
             </Flexbox>
           </Flexbox>
@@ -696,6 +673,7 @@ const ChatGroupWizard = memo<ChatGroupWizardProps>(
                 {selectedTemplate ? (
                   templateMemberItems.length > 0 ? (
                     <List
+                      styles={{ item: { paddingInlineEnd: 56 } }}
                       items={templateMemberItems.map((member) => ({
                         actions: (
                           <Switch
@@ -725,12 +703,12 @@ const ChatGroupWizard = memo<ChatGroupWizardProps>(
                           </Tooltip>
                         ) : null,
                         key: member.key,
-                        showAction: true,
-                        title: (
+                        label: (
                           <Text type={member.isRemoved ? 'secondary' : undefined}>
                             {member.title}
                           </Text>
                         ),
+                        showAction: true,
                       }))}
                     />
                   ) : (
@@ -742,7 +720,10 @@ const ChatGroupWizard = memo<ChatGroupWizardProps>(
                     />
                   )
                 ) : selectedAgentListItems.length > 0 ? (
-                  <List items={selectedAgentListItems} />
+                  <List
+                    items={selectedAgentListItems}
+                    styles={{ item: { paddingInlineEnd: 56 } }}
+                  />
                 ) : (
                   <Empty
                     description={t('memberSelection.noSelectedAgents')}
@@ -755,7 +736,7 @@ const ChatGroupWizard = memo<ChatGroupWizardProps>(
             </Flexbox>
           </Flexbox>
         </Flexbox>
-      </Modal>
+      </ImperativeModal>
     );
   },
 );

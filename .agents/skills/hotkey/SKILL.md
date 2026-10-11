@@ -1,6 +1,7 @@
 ---
 name: hotkey
-description: Guide for adding keyboard shortcuts. Use when implementing new hotkeys, registering shortcuts, or working with keyboard interactions. Triggers on hotkey implementation or keyboard shortcut tasks.
+description: 'Use for keyboard shortcuts, registration, key combinations, scope, conflicts and shortcut tooltips.'
+user-invocable: false
 ---
 
 # Adding Keyboard Shortcuts Guide
@@ -9,27 +10,31 @@ description: Guide for adding keyboard shortcuts. Use when implementing new hotk
 
 ### 1. Update Hotkey Constant
 
-In `src/types/hotkey.ts`:
+In `packages/types/src/hotkey.ts`, add the new id to the `HotkeyId` union — it's the source of truth `HotkeyEnum` is typed against:
 
 ```typescript
-export const HotkeyEnum = {
+export type HotkeyId =
+  | 'addUserMessage'
   // existing...
-  ClearChat: 'clearChat', // Add new
-} as const;
+  | 'saveTopic';
 ```
 
 ### 2. Register Default Hotkey
 
-In `src/const/hotkeys.ts`:
+In `packages/const/src/hotkeys.ts`, `KeyEnum` and `combineKeys` are already defined locally in this file, so no import is needed — add the entry to `HotkeyEnum` and to `HOTKEYS_REGISTRATION`:
 
 ```typescript
-import { KeyMapEnum as Key, combineKeys } from '@lobehub/ui';
+export const HotkeyEnum = {
+  // existing...
+  SaveTopic: 'saveTopic',
+} as const satisfies Record<string, HotkeyId>;
 
 export const HOTKEYS_REGISTRATION: HotkeyRegistration = [
+  // existing...
   {
     group: HotkeyGroupEnum.Conversation,
-    id: HotkeyEnum.ClearChat,
-    keys: combineKeys([Key.Mod, Key.Shift, Key.Backspace]),
+    id: HotkeyEnum.SaveTopic,
+    keys: combineKeys([KeyEnum.Alt, 'n']),
     scopes: [HotkeyScopeEnum.Chat],
   },
 ];
@@ -37,13 +42,13 @@ export const HOTKEYS_REGISTRATION: HotkeyRegistration = [
 
 ### 3. Add i18n Translation
 
-In `src/locales/default/hotkey.ts`:
+In `packages/locales/src/default/hotkey.ts`:
 
 ```typescript
 const hotkey: HotkeyI18nTranslations = {
-  clearChat: {
-    desc: '清空当前会话的所有消息记录',
-    title: '清空聊天记录',
+  saveTopic: {
+    desc: '保存当前话题并新建一个话题',
+    title: '保存话题',
   },
 };
 ```
@@ -53,13 +58,13 @@ const hotkey: HotkeyI18nTranslations = {
 In `src/hooks/useHotkeys/chatScope.ts`:
 
 ```typescript
-export const useClearChatHotkey = () => {
-  const clearMessages = useChatStore((s) => s.clearMessages);
-  return useHotkeyById(HotkeyEnum.ClearChat, clearMessages);
+export const useSaveTopicHotkey = () => {
+  const openNewTopicOrSaveTopic = useChatStore((s) => s.openNewTopicOrSaveTopic);
+  return useHotkeyById(HotkeyEnum.SaveTopic, openNewTopicOrSaveTopic);
 };
 
 export const useRegisterChatHotkeys = () => {
-  useClearChatHotkey();
+  useSaveTopicHotkey();
   // ...other hotkeys
 };
 ```
@@ -67,10 +72,10 @@ export const useRegisterChatHotkeys = () => {
 ### 5. Add Tooltip (Optional)
 
 ```tsx
-const clearChatHotkey = useUserStore(settingsSelectors.getHotkeyById(HotkeyEnum.ClearChat));
+const saveTopicHotkey = useUserStore(settingsSelectors.getHotkeyById(HotkeyEnum.SaveTopic));
 
-<Tooltip hotkey={clearChatHotkey} title={t('clearChat.title', { ns: 'hotkey' })}>
-  <Button icon={<DeleteOutlined />} onClick={clearMessages} />
+<Tooltip hotkey={saveTopicHotkey} title={t('saveTopic.title', { ns: 'hotkey' })}>
+  <Button icon={<SaveOutlined />} onClick={openNewTopicOrSaveTopic} />
 </Tooltip>;
 ```
 
@@ -79,12 +84,12 @@ const clearChatHotkey = useUserStore(settingsSelectors.getHotkeyById(HotkeyEnum.
 1. **Scope**: Choose global or chat scope based on functionality
 2. **Grouping**: Place in appropriate group (System/Layout/Conversation)
 3. **Conflict check**: Ensure no conflict with system/browser shortcuts
-4. **Platform**: Use `Key.Mod` instead of hardcoded `Ctrl` or `Cmd`
+4. **Platform**: Use `KeyEnum.Mod` instead of hardcoded `Ctrl` or `Cmd`
 5. **Clear description**: Provide title and description for users
 
 ## Troubleshooting
 
 - **Not working**: Check scope and RegisterHotkeys hook
-- **Not in settings**: Verify HOTKEYS_REGISTRATION config
+- **Not in settings**: Verify HOTKEYS\_REGISTRATION config
 - **Conflict**: HotkeyInput component shows warnings
 - **Page-specific**: Ensure correct scope activation

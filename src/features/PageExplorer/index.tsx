@@ -1,12 +1,21 @@
 'use client';
 
-import { memo, useCallback } from 'react';
+import { memo, type ReactNode, useCallback } from 'react';
 
 import { PageEditor } from '@/features/PageEditor';
 import { pageSelectors, usePageStore } from '@/store/page';
 
 interface PageExplorerProps {
+  /** Forwarded to PageEditor. */
+  fullWidthHeader?: boolean;
+  /**
+   * Custom header slot. `null` hides the editor header entirely; any node
+   * replaces the built-in `<Header />`. Forwarded to PageEditor.
+   */
+  header?: ReactNode | null;
   pageId: string;
+  /** Forwarded to PageEditor. Mobile has no room for the copilot / comments panel. */
+  rightPanel?: boolean;
 }
 
 /**
@@ -14,7 +23,7 @@ interface PageExplorerProps {
  *
  * Work together with a sidebar @/features/Pages/PageLayout/Body
  */
-const PageExplorer = memo<PageExplorerProps>(({ pageId }) => {
+const PageExplorer = memo<PageExplorerProps>(({ pageId, header, fullWidthHeader, rightPanel }) => {
   const updatePageOptimistically = usePageStore((s) => s.updatePageOptimistically);
 
   // Get document title and emoji from PageStore
@@ -40,8 +49,11 @@ const PageExplorer = memo<PageExplorerProps>(({ pageId }) => {
   return (
     <PageEditor
       emoji={emoji}
+      fullWidthHeader={fullWidthHeader}
+      header={header}
       key={pageId}
       pageId={pageId}
+      rightPanel={rightPanel}
       title={title}
       onEmojiChange={handleEmojiChange}
       onTitleChange={handleTitleChange}

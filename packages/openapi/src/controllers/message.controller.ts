@@ -11,7 +11,7 @@ import type {
 
 export class MessageController extends BaseController {
   /**
-   * 统一的消息数量统计接口 (RESTful API 优化后)
+   * Unified message count endpoint (RESTful API optimized)
    * GET /api/v1/messages/count
    * Query: { topicIds?: string, userId?: string }
    */
@@ -20,24 +20,24 @@ export class MessageController extends BaseController {
       const userId = this.getUserId(c)!;
       const rawQuery = this.getQuery(c);
 
-      // 处理 topicIds 参数 (comma-separated string -> array)
+      // Process topicIds parameter (comma-separated string -> array)
       const processedQuery: MessagesCountQuery = {
         ...rawQuery,
         topicIds: rawQuery.topicIds ? (rawQuery.topicIds as string).split(',') : undefined,
       };
 
       const db = await this.getDatabase();
-      const messageService = new MessageService(db, userId);
+      const messageService = new MessageService(db, userId, this.getWorkspaceId(c));
       const result = await messageService.countMessages(processedQuery);
 
-      return this.success(c, result, '查询消息数量成功');
+      return this.success(c, result, 'Message count retrieved successfully');
     } catch (error) {
       return this.handleError(c, error);
     }
   }
 
   /**
-   * 统一的消息列表查询接口 (RESTful API 优化后)
+   * Unified message list query endpoint (RESTful API optimized)
    * GET /api/v1/messages
    * Query: { page?, limit?, topicId?, userId?, role?, query?, sort?, order? }
    */
@@ -47,17 +47,17 @@ export class MessageController extends BaseController {
       const request = this.getQuery<MessagesListQuery>(c);
 
       const db = await this.getDatabase();
-      const messageService = new MessageService(db, userId);
+      const messageService = new MessageService(db, userId, this.getWorkspaceId(c));
       const result = await messageService.getMessages(request);
 
-      return this.success(c, result, '获取消息列表成功');
+      return this.success(c, result, 'Message list retrieved successfully');
     } catch (error) {
       return this.handleError(c, error);
     }
   }
 
   /**
-   * 根据消息ID获取消息详情
+   * Retrieves message details by message ID
    * GET /api/v1/messages/:id
    * Params: { id: string }
    */
@@ -67,21 +67,21 @@ export class MessageController extends BaseController {
       const { id } = this.getParams<{ id: string }>(c);
 
       const db = await this.getDatabase();
-      const messageService = new MessageService(db, userId);
+      const messageService = new MessageService(db, userId, this.getWorkspaceId(c));
       const message = await messageService.getMessageById(id);
 
       if (!message) {
-        return this.error(c, '消息不存在或无权限访问', 404);
+        return this.error(c, 'Message not found or access denied', 404);
       }
 
-      return this.success(c, message, '获取消息详情成功');
+      return this.success(c, message, 'Message details retrieved successfully');
     } catch (error) {
       return this.handleError(c, error);
     }
   }
 
   /**
-   * 创建新消息
+   * Creates a new message
    * POST /api/v1/messages
    * Body: { content: string, role: 'user'|'assistant'|'system'|'tool', topicId?: string, model?: string, provider?: string, files?: string[] }
    */
@@ -91,17 +91,17 @@ export class MessageController extends BaseController {
       const messageData = (await this.getBody<MessagesCreateRequest>(c))!;
 
       const db = await this.getDatabase();
-      const messageService = new MessageService(db, userId);
+      const messageService = new MessageService(db, userId, this.getWorkspaceId(c));
       const result = await messageService.createMessage(messageData);
 
-      return this.success(c, result, '创建消息成功');
+      return this.success(c, result, 'Message created successfully');
     } catch (error) {
       return this.handleError(c, error);
     }
   }
 
   /**
-   * 创建用户消息并生成AI回复
+   * Creates a user message and generates an AI reply
    * POST /api/v1/messages/replies
    * Body: { content: string, role: 'user', topicId?: string, model?: string, provider?: string, files?: string[] }
    */
@@ -111,17 +111,17 @@ export class MessageController extends BaseController {
       const messageData = (await this.getBody<MessagesCreateRequest>(c))!;
 
       const db = await this.getDatabase();
-      const messageService = new MessageService(db, userId);
+      const messageService = new MessageService(db, userId, this.getWorkspaceId(c));
       const result = await messageService.createMessageWithAIReply(messageData);
 
-      return this.success(c, result, '创建消息并生成AI回复成功');
+      return this.success(c, result, 'Message created and AI reply generated successfully');
     } catch (error) {
       return this.handleError(c, error);
     }
   }
 
   /**
-   * 删除单个消息
+   * Deletes a single message
    * DELETE /api/v1/messages/:id
    * Params: { id: string }
    */
@@ -131,17 +131,17 @@ export class MessageController extends BaseController {
       const { id } = this.getParams<{ id: string }>(c);
 
       const db = await this.getDatabase();
-      const messageService = new MessageService(db, userId);
+      const messageService = new MessageService(db, userId, this.getWorkspaceId(c));
       await messageService.deleteMessage(id);
 
-      return this.success(c, null, '删除消息成功');
+      return this.success(c, null, 'Message deleted successfully');
     } catch (error) {
       return this.handleError(c, error);
     }
   }
 
   /**
-   * 批量删除消息
+   * Batch deletes messages
    * DELETE /api/v1/messages
    * Body: { messageIds: string[] }
    */
@@ -151,10 +151,10 @@ export class MessageController extends BaseController {
       const { messageIds } = (await this.getBody<MessagesDeleteBatchRequest>(c))!;
 
       const db = await this.getDatabase();
-      const messageService = new MessageService(db, userId);
+      const messageService = new MessageService(db, userId, this.getWorkspaceId(c));
       const result = await messageService.deleteBatchMessages(messageIds);
 
-      return this.success(c, result, '批量删除消息成功');
+      return this.success(c, result, 'Messages deleted in batch successfully');
     } catch (error) {
       return this.handleError(c, error);
     }

@@ -38,11 +38,10 @@ vi.mock('@/store/chat', () => ({
       replaceMessages: vi.fn(),
       internal_dispatchMessage: vi.fn(),
       internal_dispatchTopic: vi.fn(),
-      internal_execAgentRuntime: vi.fn(),
+      executeClientAgent: vi.fn(),
       sendMessage: vi.fn(),
       switchTopic: vi.fn(),
       summaryTopicTitle: vi.fn(),
-      internal_updateTopicLoading: vi.fn(),
     })),
     setState: vi.fn(),
   },
@@ -59,10 +58,7 @@ vi.mock('@/store/agent', () => ({
 
 vi.mock('@/store/agent/selectors', () => ({
   agentChatConfigSelectors: {
-    currentChatConfig: vi.fn(() => ({
-      enableAutoCreateTopic: false,
-      autoCreateTopicThreshold: 5,
-    })),
+    currentChatConfig: vi.fn(() => ({})),
   },
   agentSelectors: {
     currentAgentConfig: vi.fn(() => ({ model: 'gpt-4', provider: 'openai' })),
@@ -201,6 +197,47 @@ describe('ConversationStore', () => {
   });
 
   describe('UI Actions', () => {
+    describe('fillInputMessage', () => {
+      it('should replace the composer content and focus the editor', () => {
+        const context: ConversationContext = {
+          agentId: 'session-1',
+          topicId: null,
+          threadId: null,
+        };
+        const editor = {
+          focus: vi.fn(),
+          setDocument: vi.fn(),
+        };
+        const store = createStore({ context });
+
+        act(() => {
+          store.getState().setEditor(editor);
+          store.getState().updateInputMessage('Existing draft');
+          store.getState().fillInputMessage('Editable opening question');
+        });
+
+        expect(store.getState().inputMessage).toBe('Editable opening question');
+        expect(editor.setDocument).toHaveBeenNthCalledWith(1, 'text', '');
+        expect(editor.setDocument).toHaveBeenNthCalledWith(2, 'text', 'Editable opening question');
+        expect(editor.focus).toHaveBeenCalledOnce();
+      });
+
+      it('should update the input state before the editor is ready', () => {
+        const context: ConversationContext = {
+          agentId: 'session-1',
+          topicId: null,
+          threadId: null,
+        };
+        const store = createStore({ context });
+
+        act(() => {
+          store.getState().fillInputMessage('Editable opening question');
+        });
+
+        expect(store.getState().inputMessage).toBe('Editable opening question');
+      });
+    });
+
     describe('updateInputMessage', () => {
       it('should update input message', () => {
         const context: ConversationContext = {
@@ -356,6 +393,62 @@ describe('ConversationStore', () => {
         });
 
         expect(store.getState().inputMessage).toBe('draft during streaming');
+      });
+
+      it('should filter local-only messages before forwarding to ChatStore.sendMessage', async () => {
+        const context: ConversationContext = {
+          agentId: 'session-1',
+          topicId: 'topic-1',
+          threadId: null,
+        };
+        const chatStoreState = useChatStore.getState();
+        const sendMessageSpy = vi.fn().mockResolvedValue({
+          assistantMessageId: 'assistant-1',
+          userMessageId: 'user-1',
+        });
+
+        vi.mocked(useChatStore.getState).mockReturnValue({
+          ...chatStoreState,
+          sendMessage: sendMessageSpy,
+        } as any);
+
+        const store = createStore({ context });
+
+        act(() => {
+          store.setState({
+            displayMessages: [
+              {
+                content: 'Local welcome',
+                createdAt: 1,
+                id: 'local-msg',
+                metadata: { scope: '__internal_local__' },
+                role: 'assistant',
+                updatedAt: 1,
+              },
+              {
+                content: 'Real assistant',
+                createdAt: 2,
+                id: 'assistant-msg',
+                role: 'assistant',
+                updatedAt: 2,
+              },
+            ],
+          });
+        });
+
+        await act(async () => {
+          await store.getState().sendMessage({ message: 'hello' } as any);
+        });
+
+        expect(sendMessageSpy).toHaveBeenCalledWith(
+          expect.objectContaining({
+            messages: [
+              expect.objectContaining({
+                id: 'assistant-msg',
+              }),
+            ],
+          }),
+        );
       });
     });
   });

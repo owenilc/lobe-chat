@@ -1,7 +1,7 @@
 'use client';
 
-import { Alert, Flexbox, MaterialFileTypeIcon, Text } from '@lobehub/ui';
-import { Descriptions } from 'antd';
+import { Flexbox, MaterialFileTypeIcon } from '@lobehub/ui';
+import { Alert, Descriptions, Text } from '@lobehub/ui/base-ui';
 import { createStaticStyles } from 'antd-style';
 import { memo } from 'react';
 
@@ -111,7 +111,6 @@ const FileCard = memo<FileCardProps>(({ file }) => {
       <div className={styles.footer}>
         <Descriptions
           column={2}
-          size="small"
           classNames={{
             content: styles.footerText,
             label: styles.footerText,
@@ -122,7 +121,10 @@ const FileCard = memo<FileCardProps>(({ file }) => {
               label: 'Chars',
             },
             {
-              children: file.totalLineCount?.toLocaleString(),
+              children:
+                file.startLine && file.endLine && (file.truncated || file.startLine > 1)
+                  ? `${file.startLine.toLocaleString()}-${file.endLine.toLocaleString()} / ${file.totalLineCount?.toLocaleString()}`
+                  : file.totalLineCount?.toLocaleString(),
               label: 'Lines',
             },
           ]}

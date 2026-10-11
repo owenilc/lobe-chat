@@ -1,35 +1,28 @@
 import { TITLE_BAR_HEIGHT } from '@lobechat/desktop-bridge';
 import { Flexbox } from '@lobehub/ui';
-import { Divider } from 'antd';
-import { memo, useMemo } from 'react';
+import { Divider } from '@lobehub/ui/base-ui';
+import { memo } from 'react';
 
+import { useDeferredMount } from '@/hooks/useDeferredMount';
 import { electronStylish } from '@/styles/electron';
-import { getPlatform, isMacOS } from '@/utils/platform';
+import { getPlatform } from '@/utils/platform';
 
 import Connection from '../connection/Connection';
-import { useTabNavigation } from '../navigation/useTabNavigation';
+import DeviceGateway from '../connection/DeviceGateway';
 import { useWatchThemeUpdate } from '../system/useWatchThemeUpdate';
 import { UpdateNotification } from '../updater/UpdateNotification';
+import { getTitleBarLayoutConfig } from './layout';
 import NavigationBar from './NavigationBar';
 import TabBar from './TabBar';
 import WinControl from './WinControl';
 
-const isMac = isMacOS();
-const isLinux = getPlatform() === 'Linux';
+const platform = getPlatform();
 
 const TitleBar = memo(() => {
   useWatchThemeUpdate();
-  useTabNavigation();
+  const tabBarMounted = useDeferredMount();
 
-  const showWinControl = isLinux && !isMac;
-
-  const padding = useMemo(() => {
-    if (showWinControl) {
-      return '0 12px 0 0';
-    }
-
-    return '0 12px';
-  }, [showWinControl]);
+  const { padding, showCustomWinControl } = getTitleBarLayoutConfig(platform);
 
   return (
     <Flexbox
@@ -42,16 +35,17 @@ const TitleBar = memo(() => {
       width={'100%'}
     >
       <NavigationBar />
-      <TabBar />
+      {tabBarMounted && <TabBar />}
 
       <Flexbox horizontal align={'center'} gap={4}>
         <Flexbox horizontal className={electronStylish.nodrag} gap={8}>
           <UpdateNotification />
+          <DeviceGateway />
           <Connection />
         </Flexbox>
-        {showWinControl && (
+        {showCustomWinControl && (
           <>
-            <Divider orientation={'vertical'} />
+            <Divider orientation={'vertical'} style={{ marginInline: 8 }} />
             <WinControl />
           </>
         )}

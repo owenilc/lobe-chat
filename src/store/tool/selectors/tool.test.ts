@@ -1,4 +1,4 @@
-import { type LobeChatPluginManifest } from '@lobehub/chat-plugin-sdk';
+import { type ToolManifest } from '@lobechat/types';
 import { describe, expect, it } from 'vitest';
 
 import { type ToolStoreState } from '../initialState';
@@ -28,7 +28,7 @@ const mockState = {
         createdAt: '2024-01-01',
         homepage: 'https://example.com/plugin-1',
         meta: { title: 'Plugin 1', description: 'Plugin 1 description' },
-      } as LobeChatPluginManifest,
+      } as ToolManifest,
       runtimeType: 'standalone',
       type: 'plugin',
     },
@@ -39,7 +39,7 @@ const mockState = {
         api: [{ name: 'api-2' }],
         author: 'Another Author',
         homepage: 'https://example.com/plugin-2',
-      } as LobeChatPluginManifest,
+      } as ToolManifest,
       runtimeType: 'default',
       type: 'plugin',
     },
@@ -67,13 +67,14 @@ const mockState = {
         identifier: 'builtin-1',
         api: [{ name: 'builtin-api-1' }],
         meta: { title: 'Builtin 1', description: 'Builtin 1 description' },
-      } as LobeChatPluginManifest,
+      } as ToolManifest,
     },
   ],
   pluginInstallLoading: {
     'plugin-1': false,
     'plugin-2': true,
   },
+  pluginInstallErrors: {},
   uninstalledBuiltinTools: [],
 } as ToolStoreState;
 
@@ -92,6 +93,21 @@ describe('toolSelectors', () => {
     it('should return "success" if the plugin manifest is loaded', () => {
       const result = toolSelectors.getManifestLoadingStatus('plugin-1')(mockState);
       expect(result).toBe('success');
+    });
+
+    it('should return "error" when a refresh failed even if an old manifest remains', () => {
+      const state = {
+        ...mockState,
+        pluginInstallErrors: {
+          'plugin-1': { cause: 'Connection refused', message: 'fetchError' },
+        },
+      } as unknown as ToolStoreState;
+
+      expect(toolSelectors.getManifestLoadingStatus('plugin-1')(state)).toBe('error');
+      expect(toolSelectors.getPluginInstallError('plugin-1')(state)).toEqual({
+        cause: 'Connection refused',
+        message: 'fetchError',
+      });
     });
   });
 

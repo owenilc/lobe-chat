@@ -6,7 +6,9 @@ import { type StateCreator } from 'zustand/vanilla';
 import { isDev } from '@/utils/env';
 
 import { createDevtools } from '../middleware/createDevtools';
+import { expose } from '../middleware/expose';
 import { flattenActions } from '../utils/flattenActions';
+import { type ResetableStore, ResetableStoreAction } from '../utils/resetableStore';
 import { type HomeStoreState } from './initialState';
 import { initialState } from './initialState';
 import { type AgentListAction } from './slices/agentList/action';
@@ -15,6 +17,8 @@ import { type GroupAction } from './slices/group/action';
 import { createGroupSlice } from './slices/group/action';
 import { type HomeInputAction } from './slices/homeInput/action';
 import { createHomeInputSlice } from './slices/homeInput/action';
+import { type LabelAction } from './slices/label/action';
+import { createLabelSlice } from './slices/label/action';
 import { type RecentAction } from './slices/recent/action';
 import { createRecentSlice } from './slices/recent/action';
 import { type SidebarUIAction } from './slices/sidebarUI/action';
@@ -28,14 +32,22 @@ export interface HomeStore
     GroupAction,
     RecentAction,
     HomeInputAction,
+    LabelAction,
     SidebarUIAction,
+    ResetableStore,
     HomeStoreState {}
 
 type HomeStoreAction = AgentListAction &
   GroupAction &
   RecentAction &
   HomeInputAction &
-  SidebarUIAction;
+  LabelAction &
+  SidebarUIAction &
+  ResetableStore;
+
+class HomeStoreResetAction extends ResetableStoreAction<HomeStore> {
+  protected readonly resetActionName = 'resetHomeStore';
+}
 
 const createStore: StateCreator<HomeStore, [['zustand/devtools', never]]> = (
   ...parameters: Parameters<StateCreator<HomeStore, [['zustand/devtools', never]]>>
@@ -46,7 +58,9 @@ const createStore: StateCreator<HomeStore, [['zustand/devtools', never]]> = (
     createGroupSlice(...parameters),
     createRecentSlice(...parameters),
     createHomeInputSlice(...parameters),
+    createLabelSlice(...parameters),
     createSidebarUISlice(...parameters),
+    new HomeStoreResetAction(...parameters),
   ]),
 });
 
@@ -61,5 +75,7 @@ export const useHomeStore = createWithEqualityFn<HomeStore>()(
   ),
   shallow,
 );
+
+expose('home', useHomeStore);
 
 export const getHomeStoreState = () => useHomeStore.getState();

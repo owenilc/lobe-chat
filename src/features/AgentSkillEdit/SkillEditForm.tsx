@@ -10,8 +10,8 @@ import {
   ReactTablePlugin,
 } from '@lobehub/editor';
 import { Editor, useEditor } from '@lobehub/editor/react';
-import { Form, type FormItemProps } from '@lobehub/ui';
-import { Form as AForm, type FormInstance, Input } from 'antd';
+import { Input, TextArea } from '@lobehub/ui/base-ui';
+import { Form, type FormFieldProps, type FormInstance } from '@lobehub/ui/base-ui/form';
 import { createStaticStyles, cssVar } from 'antd-style';
 import { memo, useCallback, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -48,20 +48,20 @@ export interface SkillEditFormValues {
 }
 
 interface SkillEditFormProps {
-  form: FormInstance;
+  disabled?: boolean;
+  form: FormInstance<SkillEditFormValues>;
   initialValues: SkillEditFormValues;
   name?: string;
-  onSubmit: (values: SkillEditFormValues) => void;
 }
 
-const SkillEditForm = memo<SkillEditFormProps>(({ name, form, initialValues, onSubmit }) => {
+const SkillEditForm = memo<SkillEditFormProps>(({ name, disabled, form, initialValues }) => {
   const { t } = useTranslation('setting');
   const editor = useEditor();
   const currentValueRef = useRef(initialValues.content);
 
   useEffect(() => {
-    form.setFieldsValue(initialValues);
-  }, [initialValues]);
+    form.setValues(initialValues);
+  }, [form, initialValues]);
 
   useEffect(() => {
     currentValueRef.current = initialValues.content;
@@ -84,16 +84,17 @@ const SkillEditForm = memo<SkillEditFormProps>(({ name, form, initialValues, onS
 
   const handleContentChange = useCallback(
     (e: any) => {
+      if (disabled) return;
       const nextContent = (e.getDocument('markdown') as unknown as string) || '';
       if (nextContent !== currentValueRef.current) {
         currentValueRef.current = nextContent;
-        form.setFieldValue('content', nextContent);
+        form.setValue('content', nextContent);
       }
     },
-    [form],
+    [disabled, form],
   );
 
-  const items: FormItemProps[] = [
+  const items: FormFieldProps<SkillEditFormValues>[] = [
     {
       children: <Input disabled readOnly value={name} />,
       desc: t('agentSkillEdit.nameDesc'),
@@ -101,8 +102,9 @@ const SkillEditForm = memo<SkillEditFormProps>(({ name, form, initialValues, onS
     },
     {
       children: (
-        <Input.TextArea
+        <TextArea
           autoSize={{ maxRows: 4, minRows: 2 }}
+          disabled={disabled}
           placeholder={t('agentSkillModal.descriptionPlaceholder')}
         />
       ),
@@ -112,7 +114,10 @@ const SkillEditForm = memo<SkillEditFormProps>(({ name, form, initialValues, onS
     },
     {
       children: (
-        <div className={styles.editorWrapper}>
+        <div
+          className={styles.editorWrapper}
+          style={{ pointerEvents: disabled ? 'none' : undefined }}
+        >
           <Editor
             content={''}
             editor={editor}
@@ -136,17 +141,11 @@ const SkillEditForm = memo<SkillEditFormProps>(({ name, form, initialValues, onS
       <Form
         form={form}
         gap={0}
-        initialValues={initialValues}
         items={items}
         itemsType={'flat'}
         layout={'vertical'}
         variant={'borderless'}
-        onFinish={onSubmit}
-      >
-        <AForm.Item hidden name="content">
-          <Input type="hidden" />
-        </AForm.Item>
-      </Form>
+      />
     </div>
   );
 });

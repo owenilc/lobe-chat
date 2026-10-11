@@ -1,4 +1,6 @@
+import { DEFAULT_MODEL, DEFAULT_PROVIDER } from '@lobechat/business-const';
 import type { ChatStreamPayload } from '@lobechat/model-runtime';
+import { mergeModelRuntimeHooks } from '@lobechat/model-runtime';
 import type { LobeAgentChatConfig, LobeAgentConfig, UserSystemAgentConfig } from '@lobechat/types';
 import { RequestTrigger } from '@lobechat/types';
 import { and, eq } from 'drizzle-orm';
@@ -6,10 +8,12 @@ import { and, eq } from 'drizzle-orm';
 import { getBusinessModelRuntimeHooks } from '@/business/server/model-runtime';
 import { DEFAULT_AGENT_CHAT_CONFIG, DEFAULT_SYSTEM_AGENT_CONFIG } from '@/const/settings';
 import { UserModel } from '@/database/models/user';
-import { agents, agentsToSessions, aiModels } from '@/database/schemas';
+import { agents, agentsToSessions, aiModels, aiProviders } from '@/database/schemas';
 import type { LobeChatDatabase } from '@/database/type';
 import { KeyVaultsGateKeeper } from '@/server/modules/KeyVaultsEncrypt';
 import { initModelRuntimeWithUserPayload } from '@/server/modules/ModelRuntime';
+import { createLLMGenerationTracingHook } from '@/server/services/llmGenerationTracing/hook';
+import { resolveSystemAgentModelConfig } from '@/server/services/systemAgent/modelConfig';
 
 import { BaseService } from '../common/base.service';
 import type { ServiceResult } from '../types';
@@ -22,24 +26,48 @@ import type {
 } from '../types/chat.type';
 
 /**
- * 聊天服务类
- * 提供与大模型对话的统一接口，支持对话、翻译、消息生成等功能
+ * Chat service class
+ * Provides a unified interface for conversations with large language models, supporting chat, translation, and message generation
  */
 export class ChatService extends BaseService {
   private config: ChatServiceConfig;
 
-  constructor(db: LobeChatDatabase, userId: string | null, config?: ChatServiceConfig) {
-    super(db, userId);
+  constructor(
+    db: LobeChatDatabase,
+    userId: string | null,
+    workspaceIdOrConfig?: string | ChatServiceConfig,
+    config?: ChatServiceConfig,
+  ) {
+    const workspaceId = typeof workspaceIdOrConfig === 'string' ? workspaceIdOrConfig : undefined;
+    const serviceConfig = typeof workspaceIdOrConfig === 'string' ? config : workspaceIdOrConfig;
+
+    super(db, userId, workspaceId);
     this.config = {
-      defaultModel: 'gpt-3.5-turbo',
-      defaultProvider: 'openai',
+      /**
+       * The product's own defaults, not literals of this file's own.
+       *
+       * These were `gpt-3.5-turbo` / `openai`, which no caller could change:
+       * `ChatServiceConfig` is only reachable through the constructor and the
+       * controller never passes one, so a request that named no model always
+       * asked for OpenAI. Any deployment that does not run OpenAI — including
+       * the default one, whose `DEFAULT_PROVIDER` is `deepseek` — answered
+       * such a request with a credential error naming a provider the caller
+       * never mentioned.
+       *
+       * `DEFAULT_MODEL` / `DEFAULT_PROVIDER` are what `DEFAULT_AGENT_CONFIG`
+       * and the rest of the product already resolve to, so `/api/v1/chat`
+       * without a model now behaves like the rest of the product instead of
+       * disagreeing with it.
+       */
+      defaultModel: DEFAULT_MODEL,
+      defaultProvider: DEFAULT_PROVIDER,
       timeout: 30_000,
-      ...config,
+      ...serviceConfig,
     };
   }
 
   /**
-   * 从错误对象中提取最可读的错误信息
+   * Extract the most readable error message from an error object
    */
   private extractErrorMessage(error: unknown): string {
     if (error instanceof Error && error.message) return error.message;
@@ -66,7 +94,7 @@ export class ChatService extends BaseService {
   }
 
   /**
-   * 判断是否是「必须开启 reasoning」的模型错误
+   * Determine if the error is a "reasoning is mandatory" model error
    */
   private isReasoningMandatoryError(error: unknown): boolean {
     const message = this.extractErrorMessage(error).toLowerCase();
@@ -80,7 +108,7 @@ export class ChatService extends BaseService {
   }
 
   /**
-   * 获取系统设置中的翻译模型配置（含默认值兜底）
+   * Get the translation model config from system settings (with default fallback)
    */
   private async getSystemTranslationModelConfig(): Promise<{ model: string; provider: string }> {
     const defaults = DEFAULT_SYSTEM_AGENT_CONFIG.translation;
@@ -94,10 +122,10 @@ export class ChatService extends BaseService {
       const systemAgent = userSettings?.systemAgent as Partial<UserSystemAgentConfig> | undefined;
       const translationConfig = systemAgent?.translation;
 
-      return {
-        model: translationConfig?.model || defaults.model,
-        provider: translationConfig?.provider || defaults.provider,
-      };
+      return resolveSystemAgentModelConfig({
+        taskConfig: translationConfig,
+        taskKey: 'translation',
+      });
     } catch (error) {
       this.log('warn', '读取系统翻译模型配置失败，使用默认配置', {
         error: this.extractErrorMessage(error),
@@ -109,14 +137,14 @@ export class ChatService extends BaseService {
   }
 
   /**
-   * 获取 Agent 的配置信息
+   * Get Agent configuration
    * @param agentId Agent ID
-   * @returns Agent 配置
+   * @returns Agent configuration
    */
   private async getAgentConfig(agentId: string): Promise<LobeAgentChatConfig | null> {
     try {
       const agent = await this.db.query.agents.findFirst({
-        where: (agents, { eq, and }) => and(eq(agents.id, agentId)),
+        where: and(eq(agents.id, agentId), this.buildWorkspaceWhere(agents)),
       });
 
       return agent?.chatConfig || null;
@@ -131,16 +159,16 @@ export class ChatService extends BaseService {
   }
 
   /**
-   * 合并 chatConfig 配置
-   * @param agentConfig Agent 的配置
-   * @param userConfig 用户传入的配置
-   * @returns 合并后的配置
+   * Merge chatConfig configuration
+   * @param agentConfig Agent's configuration
+   * @param userConfig User-provided configuration
+   * @returns Merged configuration
    */
   private mergeChatConfig(
     agentConfig: LobeAgentChatConfig | null,
     userConfig?: Partial<LobeAgentChatConfig>,
   ): LobeAgentChatConfig {
-    // 按优先级合并：用户配置 > Agent配置 > 默认配置
+    // Merge by priority: user config > Agent config > default config
     return {
       ...DEFAULT_AGENT_CHAT_CONFIG,
       ...agentConfig,
@@ -149,9 +177,9 @@ export class ChatService extends BaseService {
   }
 
   /**
-   * 根据 chatConfig 构建搜索相关参数
-   * @param chatConfig 聊天配置
-   * @returns 搜索参数
+   * Build search-related parameters from chatConfig
+   * @param chatConfig Chat configuration
+   * @returns Search parameters
    */
   private buildSearchParams(chatConfig: LobeAgentChatConfig) {
     const enabledSearch = chatConfig.searchMode !== 'off';
@@ -164,20 +192,39 @@ export class ChatService extends BaseService {
   }
 
   /**
-   * 获取AI Provider的API Key
-   * @param provider 提供商ID
+   * Get the API Key for an AI Provider
+   * @param provider Provider ID
    * @returns API Key
    */
   private async getApiKey(provider: string) {
     const gateKeeper = await KeyVaultsGateKeeper.initWithEnvKey();
 
     const aiProviderConfigs = await this.db.query.aiProviders.findMany({
-      where: (aiProviders, { eq, and }) =>
-        and(eq(aiProviders.userId, this.userId!), eq(aiProviders.id, provider)),
+      where: and(eq(aiProviders.id, provider), this.buildWorkspaceWhere(aiProviders)),
     });
 
-    if (!aiProviderConfigs || aiProviderConfigs.length === 0) {
+    const providerConfig = aiProviderConfigs?.[0];
+
+    /**
+     * No row, or a row that stores no key of its own.
+     *
+     * The second case is the ordinary one for a deployment whose provider
+     * credentials come from the environment rather than from per-user vaults:
+     * the row exists so the provider can be enabled and ordered in the UI,
+     * and `keyVaults` stays null. `decrypt` splits its argument on `:` as its
+     * very first statement, so passing that null through — which the `!` below
+     * used to assert away — threw `Cannot read properties of null (reading
+     * 'split')` out of every `/api/v1/chat*` call, from inside a helper whose
+     * name gives no hint that a credential lookup is what failed.
+     *
+     * Both cases mean the same thing to the caller: this provider has no
+     * user-supplied key, so hand back an empty vault and let the model runtime
+     * fall back to the environment, exactly as it already did when no row
+     * existed at all.
+     */
+    if (!providerConfig?.keyVaults) {
       this.log('info', '未找到有效的AI Provider配置，使用兜底环境变量配置', {
+        hasRow: !!providerConfig,
         provider,
         userId: this.userId,
       });
@@ -185,16 +232,15 @@ export class ChatService extends BaseService {
       return '{}';
     }
 
-    const providerConfig = aiProviderConfigs[0];
-    const { plaintext } = await gateKeeper.decrypt(providerConfig.keyVaults!);
+    const { plaintext } = await gateKeeper.decrypt(providerConfig.keyVaults);
 
     return plaintext;
   }
 
   /**
-   * 解析SSE格式的响应内容
-   * @param text SSE格式的文本
-   * @returns 解析出的内容
+   * Parse SSE-format response content
+   * @param text SSE-format text
+   * @returns Parsed content
    */
   private parseSSEContent(text: string): string {
     const lines = text.split('\n');
@@ -206,18 +252,18 @@ export class ChatService extends BaseService {
           const dataJson = line.slice(6);
           const data = JSON.parse(dataJson);
 
-          // 处理标准的OpenAI Chat Completion格式
+          // Handle standard OpenAI Chat Completion format
           if (data.choices?.[0]?.delta?.content) {
             content += data.choices[0].delta.content;
           } else if (data.choices?.[0]?.message?.content) {
             content = data.choices[0].message.content;
           }
-          // 处理直接字符串内容（OpenAI Reasoning模式）
+          // Handle direct string content (OpenAI Reasoning mode)
           else if (typeof data === 'string') {
             content += data;
           }
         } catch {
-          // 忽略解析错误
+          // Ignore parse errors
         }
       }
     }
@@ -226,9 +272,9 @@ export class ChatService extends BaseService {
   }
 
   /**
-   * 处理流式响应
-   * @param response 响应对象
-   * @returns 完整的响应内容
+   * Handle streaming response
+   * @param response Response object
+   * @returns Complete response content
    */
   private async handleStreamResponse(response: Response): Promise<string> {
     const reader = response.body?.getReader();
@@ -250,23 +296,23 @@ export class ChatService extends BaseService {
       reader.releaseLock();
     }
 
-    // 移除可能的结尾控制字符
+    // Remove possible trailing control characters
     return finalContent.replace(/\s*stop\s*$/i, '').trim();
   }
 
   /**
-   * 处理非流式响应
-   * @param response 响应对象
-   * @returns 解析后的JSON数据
+   * Handle non-streaming response
+   * @param response Response object
+   * @returns Parsed JSON data
    */
   private async handleNonStreamResponse(response: Response): Promise<any> {
     try {
       return await response.json();
     } catch {
-      // 如果JSON解析失败，尝试读取文本内容
+      // If JSON parsing fails, try reading text content
       const text = await response.text();
 
-      // 尝试从文本中提取内容
+      // Try to extract content from text
       if (text.includes('data: ')) {
         const content = this.parseSSEContent(text);
         if (content) {
@@ -288,16 +334,16 @@ export class ChatService extends BaseService {
   }
 
   /**
-   * 通用聊天接口
-   * @param params 聊天参数
-   * @param options 附加选项
-   * @returns 聊天响应
+   * General chat interface
+   * @param params Chat parameters
+   * @param options Additional options
+   * @returns Chat response
    */
   async chat(
     params: ChatServiceParams,
     options?: Partial<ChatStreamPayload>,
   ): ServiceResult<ChatServiceResponse> {
-    // 权限检查
+    // Permission check
     const permissionModel = await this.resolveOperationPermission('AI_MODEL_INVOKE', {
       targetModelId: params.model,
     });
@@ -318,16 +364,20 @@ export class ChatService extends BaseService {
     try {
       const { apiKey } = JSON.parse(await this.getApiKey(provider));
 
-      // 创建 AgentRuntime 实例
-      const hooks = getBusinessModelRuntimeHooks(this.userId!, provider);
+      // Create AgentRuntime instance. Pass workspaceId so workspace-key calls
+      // bill the workspace budget (not the key creator's personal budget) and
+      // trace under the workspace, matching initModelRuntimeFromDB.
+      const businessHooks = getBusinessModelRuntimeHooks(this.userId!, provider, this.workspaceId);
+      const tracingHooks = createLLMGenerationTracingHook(this.userId!, provider, this.workspaceId);
+      const hooks = mergeModelRuntimeHooks(businessHooks, tracingHooks);
       const modelRuntime = await initModelRuntimeWithUserPayload(
         provider,
         { apiKey, userId: this.userId! },
-        {},
+        this.workspaceId ? { workspaceId: this.workspaceId } : {},
         hooks,
       );
 
-      // 构建 ChatStreamPayload
+      // Build ChatStreamPayload
       const chatPayload: ChatStreamPayload = {
         frequency_penalty: params.frequency_penalty,
         max_tokens: params.max_tokens,
@@ -335,21 +385,23 @@ export class ChatService extends BaseService {
         model,
         presence_penalty: params.presence_penalty,
         stream: params.stream,
-        temperature: params.temperature || 1,
+        // `?? 1`, not `|| 1`: the schema accepts `temperature: 0`, and a falsy
+        // check would silently promote a deterministic request to temperature 1.
+        temperature: params.temperature ?? 1,
         top_p: params.top_p,
         ...options,
       };
 
-      // 调用聊天 API
+      // Call chat API
       const response = await modelRuntime.chat(chatPayload, {
         metadata: { trigger: RequestTrigger.Api },
         user: this.userId!,
       });
 
-      // 检查响应类型
+      // Check response type
       const contentType = response.headers.get('content-type') || '';
 
-      // 统一处理流式和非流式响应
+      // Uniformly handle streaming and non-streaming responses
       let result;
       if (contentType.includes('text/stream') || contentType.includes('text/event-stream')) {
         const content = await this.handleStreamResponse(response);
@@ -380,10 +432,8 @@ export class ChatService extends BaseService {
         usage: result.usage,
       };
     } catch (error) {
-      // 改进错误日志记录，提供更详细的错误信息
+      // Improve error logging with more detailed error information
       let errorDetails: any;
-
-      console.error('error', error);
 
       if (error instanceof Error) {
         errorDetails = {
@@ -410,14 +460,14 @@ export class ChatService extends BaseService {
   }
 
   /**
-   * 翻译文本
-   * @param params 翻译参数
-   * @returns 翻译结果
+   * Translate text
+   * @param params Translation parameters
+   * @returns Translation result
    */
   async translate(request: TranslateServiceParams): ServiceResult<string> {
     const systemTranslationConfig = await this.getSystemTranslationModelConfig();
 
-    // 获取最终使用的模型配置（优先级：请求参数 > 系统设置翻译模型 > session 配置 > 默认配置）
+    // Get the final model config (priority: request params > system translation model > session config > default config)
     const modelConfig = await this.resolveModelConfig({
       model: request.model || systemTranslationConfig.model,
       provider: request.provider || systemTranslationConfig.provider,
@@ -429,22 +479,18 @@ export class ChatService extends BaseService {
     const finalModel =
       modelConfig.model || systemTranslationConfig.model || this.config.defaultModel!;
 
-    // 权限检查（基于最终使用的模型）
+    // Permission check (based on the final model being used)
     const modelScopedPermission = await this.resolveOperationPermission('AI_MODEL_INVOKE', {
       targetModelId: finalModel,
     });
 
+    // Only `translate` carried a second, target-less retry here. It existed to
+    // work around the gate treating an unowned model as somebody else's, which
+    // `resolveOperationPermission` now distinguishes — so the retry can never
+    // change the outcome, and keeping it would suggest the two sibling
+    // endpoints in this file were simply missing it.
     if (!modelScopedPermission.isPermitted) {
-      const fallbackPermission = await this.resolveOperationPermission('AI_MODEL_INVOKE');
-      if (!fallbackPermission.isPermitted) {
-        throw this.createAuthorizationError(modelScopedPermission.message || '无权限操作');
-      }
-
-      this.log('warn', '模型级权限校验失败，已回退到通用模型调用权限校验', {
-        model: finalModel,
-        provider: finalProvider,
-        userId: this.userId,
-      });
+      throw this.createAuthorizationError(modelScopedPermission.message || '无权限操作');
     }
 
     this.log('info', '开始翻译文本', {
@@ -457,7 +503,7 @@ export class ChatService extends BaseService {
     });
 
     try {
-      // 构建翻译prompt
+      // Build translation prompt
       const systemPrompt = `
       你是一个专业的翻译助手。请将用户提供的文本
       ${request.from ? `从${request.from}` : ''}翻译成${request.to}。
@@ -481,7 +527,7 @@ export class ChatService extends BaseService {
         presence_penalty: 0,
         provider: finalProvider,
         stream: false,
-        temperature: 0.3, // 较低的温度以确保翻译的一致性
+        temperature: 0.3, // Lower temperature to ensure translation consistency
       };
 
       const response = await this.chat(chatParams);
@@ -499,12 +545,12 @@ export class ChatService extends BaseService {
   }
 
   /**
-   * 生成消息回复
-   * @param params 消息生成参数
-   * @returns 生成的回复内容
+   * Generate a message reply
+   * @param params Message generation parameters
+   * @returns Generated reply content
    */
   async generateReply(params: MessageGenerationParams): ServiceResult<string> {
-    // 权限检查
+    // Permission check
     const permissionModel = await this.resolveOperationPermission('AI_MODEL_INVOKE', {
       targetModelId: params.model,
     });
@@ -521,7 +567,7 @@ export class ChatService extends BaseService {
     });
 
     try {
-      // 1. 获取最终使用的模型配置
+      // 1. Get the final model configuration
       const modelConfig = await this.resolveModelConfig({
         agentId: params.agentId,
         model: params.model,
@@ -529,16 +575,16 @@ export class ChatService extends BaseService {
         sessionId: params.sessionId,
       });
 
-      // 2. 获取 Agent 配置（如果有 agentId）
+      // 2. Get Agent configuration (if agentId is provided)
       let agentConfig: LobeAgentChatConfig | null = null;
       if (params.agentId) {
         agentConfig = await this.getAgentConfig(params.agentId);
       }
 
-      // 3. 合并配置：用户配置 > Agent配置 > 默认配置
+      // 3. Merge config: user config > Agent config > default config
       const mergedChatConfig = this.mergeChatConfig(agentConfig, params.chatConfig);
 
-      // 3. 构建搜索参数
+      // 3. Build search parameters
       const searchParams = this.buildSearchParams(mergedChatConfig);
 
       this.log('info', '会话配置合并完成', {
@@ -547,7 +593,7 @@ export class ChatService extends BaseService {
         useModelBuiltinSearch: mergedChatConfig.useModelBuiltinSearch,
       });
 
-      // 5. 构建对话历史
+      // 5. Build conversation history
       const messages = [
         ...params.conversationHistory,
         { content: params.userMessage, role: 'user' as const },
@@ -563,7 +609,7 @@ export class ChatService extends BaseService {
             : 'default',
       });
 
-      // 6. 调用聊天服务生成回复，传递搜索参数
+      // 6. Call the chat service to generate a reply, passing search parameters
       const response = await this.chat(
         {
           frequency_penalty: modelConfig.agent?.params?.frequency_penalty || 0,
@@ -599,7 +645,7 @@ export class ChatService extends BaseService {
   }
 
   /**
-   * 获取最终使用的模型配置（优先级：用户指定 > sessionId配置 > 默认配置）
+   * Get the final model configuration (priority: user-specified > sessionId config > default config)
    */
   async resolveModelConfig(params: {
     agentId?: string;
@@ -607,13 +653,13 @@ export class ChatService extends BaseService {
     provider?: string;
     sessionId?: string | null;
   }): Promise<{ agent?: LobeAgentConfig; model?: string; provider?: string }> {
-    // 如果用户已经指定了 provider 和 model，直接使用
+    // If the user has already specified provider and model, use them directly
     if (params.provider && params.model) {
       return { model: params.model, provider: params.provider };
     }
 
     try {
-      // 尝试根据 sessionId 或 agentId 获取模型配置
+      // Try to get model config based on sessionId or agentId
       if (params.sessionId) {
         const agentAndModel = await this.db
           .select({
@@ -626,10 +672,15 @@ export class ChatService extends BaseService {
             aiModels,
             and(
               eq(agents.model, aiModels.id),
-              eq(agents.provider, aiModels.providerId), // 确保 provider 也匹配
+              eq(agents.provider, aiModels.providerId), // Ensure provider also matches
             ),
           )
-          .where(and(eq(agentsToSessions.sessionId, params.sessionId!)));
+          .where(
+            and(
+              eq(agentsToSessions.sessionId, params.sessionId!),
+              this.buildWorkspaceWhere(agentsToSessions),
+            ),
+          );
 
         if (!agentAndModel.length) {
           this.log('warn', '会话对应的模型配置不存在', {
@@ -647,9 +698,12 @@ export class ChatService extends BaseService {
           sessionId: params.sessionId,
         });
 
-        // 查找会话对应的 agent
+        // Find the agent corresponding to the session
         const agentToSession = await this.db.query.agentsToSessions.findFirst({
-          where: (agentsToSessions, { eq }) => eq(agentsToSessions.sessionId, params.sessionId!),
+          where: and(
+            eq(agentsToSessions.sessionId, params.sessionId!),
+            this.buildWorkspaceWhere(agentsToSessions),
+          ),
         });
 
         if (!agentToSession) {
@@ -660,7 +714,7 @@ export class ChatService extends BaseService {
           sessionId: params.sessionId,
         });
 
-        // 返回最终配置（用户指定 > session配置 > 默认）
+        // Return final config (user-specified > session config > default)
         return {
           agent: agent as LobeAgentConfig,
           model: model.id || params.model,
@@ -675,7 +729,7 @@ export class ChatService extends BaseService {
       throw this.createCommonError('获取模型配置失败');
     }
 
-    // 返回用户指定或默认配置
+    // Return user-specified or default config
     return {
       model: params.model,
       provider: params.provider,

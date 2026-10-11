@@ -5,9 +5,14 @@ import type {
   ExperienceMemoryItemSchema,
   PreferenceMemoryItemSchema,
   RemoveIdentityActionSchema,
-  UpdateIdentityActionSchema,
+  UpdateIdentityToolInputSchema,
 } from '@lobechat/memory-user-memory/schemas';
-import type { BuiltinToolContext, BuiltinToolResult, SearchMemoryParams } from '@lobechat/types';
+import type {
+  BuiltinToolContext,
+  BuiltinToolResult,
+  QueryTaxonomyOptionsParams,
+  SearchMemoryParams,
+} from '@lobechat/types';
 import { BaseExecutor } from '@lobechat/types';
 import type { z } from 'zod';
 
@@ -68,6 +73,10 @@ class MemoryExecutor extends BaseExecutor<typeof MemoryApiName> {
     });
   };
 
+  queryTaxonomyOptions = async (params: QueryTaxonomyOptionsParams): Promise<BuiltinToolResult> => {
+    return this.runtime.queryTaxonomyOptions(params);
+  };
+
   addContextMemory = async (
     params: z.infer<typeof ContextMemoryItemSchema>,
     ctx?: BuiltinToolContext,
@@ -109,7 +118,7 @@ class MemoryExecutor extends BaseExecutor<typeof MemoryApiName> {
   };
 
   updateIdentityMemory = async (
-    params: z.infer<typeof UpdateIdentityActionSchema>,
+    params: z.input<typeof UpdateIdentityToolInputSchema>,
     ctx?: BuiltinToolContext,
   ): Promise<BuiltinToolResult> => {
     this.ensureWritable(ctx?.agentId);

@@ -1,14 +1,26 @@
 // @vitest-environment node
 import { ASYNC_TASK_TIMEOUT } from '@lobechat/business-config/server';
-import type { UserMemoryExtractionMetadata } from '@lobechat/types';
-import { AsyncTaskStatus, AsyncTaskType } from '@lobechat/types';
+import type {
+  HourlyUserMemoryExtractionMetadata,
+  UserMemoryExtractionMetadata,
+} from '@lobechat/types';
+import {
+  AsyncTaskError,
+  AsyncTaskErrorType,
+  AsyncTaskStatus,
+  AsyncTaskType,
+} from '@lobechat/types';
 import { eq } from 'drizzle-orm';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { getTestDB } from '../../core/getTestDB';
 import { asyncTasks, users } from '../../schemas';
 import type { LobeChatDatabase } from '../../type';
-import { AsyncTaskModel, initUserMemoryExtractionMetadata } from '../asyncTask';
+import {
+  AsyncTaskModel,
+  initHourlyUserMemoryExtractionMetadata,
+  initUserMemoryExtractionMetadata,
+} from '../asyncTask';
 
 const serverDB: LobeChatDatabase = await getTestDB();
 
@@ -154,6 +166,37 @@ describe('AsyncTaskModel', () => {
       expect(secondMetadata?.progress?.completedTopics).toBe(2);
       expect(task?.status).toBe(AsyncTaskStatus.Success);
     });
+
+    it('should preserve error status and error payload when progress reaches total after failure', async () => {
+      const error = new AsyncTaskError(AsyncTaskErrorType.ServerError, 'Extraction failed');
+
+      const { id } = await serverDB
+        .insert(asyncTasks)
+        .values({
+          error,
+          metadata: {
+            progress: {
+              completedTopics: 1,
+              totalTopics: 2,
+            },
+            source: 'chat_topic',
+          },
+          status: AsyncTaskStatus.Error,
+          type: AsyncTaskType.UserMemoryExtractionWithChatTopic,
+          userId,
+        })
+        .returning()
+        .then((res) => res[0]);
+
+      await asyncTaskModel.incrementUserMemoryExtractionProgress(id);
+
+      const task = await serverDB.query.asyncTasks.findFirst({ where: eq(asyncTasks.id, id) });
+      const metadata = task?.metadata as UserMemoryExtractionMetadata | undefined;
+
+      expect(metadata?.progress?.completedTopics).toBe(2);
+      expect(task?.status).toBe(AsyncTaskStatus.Error);
+      expect(task?.error).toEqual(error);
+    });
   });
 
   describe('findActiveByType', () => {
@@ -279,6 +322,329 @@ describe('AsyncTaskModel', () => {
       expect(updatedTask?.error).toBeNull();
     });
   });
+
+  describe('isUserMemoryExtractionCancellationRequested', () => {
+    it('should return true when cancellation is requested for current user memory extraction task', async () => {
+      const [task] = await serverDB
+        .insert(asyncTasks)
+        .values({
+          metadata: {
+            control: {
+              cancelRequestedAt: new Date().toISOString(),
+            },
+            progress: {
+              completedTopics: 0,
+              totalTopics: 1,
+            },
+            source: 'chat_topic',
+          },
+          status: AsyncTaskStatus.Processing,
+          type: AsyncTaskType.UserMemoryExtractionWithChatTopic,
+          userId,
+        })
+        .returning();
+
+      const requested = await asyncTaskModel.isUserMemoryExtractionCancellationRequested(task.id);
+
+      expect(requested).toBe(true);
+    });
+
+    it('should return false when task is not user memory extraction type', async () => {
+      const [task] = await serverDB
+        .insert(asyncTasks)
+        .values({
+          metadata: {
+            control: {
+              cancelRequestedAt: new Date().toISOString(),
+            },
+            progress: {
+              completedTopics: 0,
+              totalTopics: 1,
+            },
+            source: 'chat_topic',
+          },
+          status: AsyncTaskStatus.Processing,
+          type: AsyncTaskType.Chunking,
+          userId,
+        })
+        .returning();
+
+      const requested = await asyncTaskModel.isUserMemoryExtractionCancellationRequested(task.id);
+
+      expect(requested).toBe(false);
+    });
+
+    it('should return false when task belongs to another user', async () => {
+      const otherUserId = 'other-user-for-cancel-test';
+      await serverDB.insert(users).values([{ id: otherUserId }]);
+
+      const [task] = await serverDB
+        .insert(asyncTasks)
+        .values({
+          metadata: {
+            control: {
+              cancelRequestedAt: new Date().toISOString(),
+            },
+            progress: {
+              completedTopics: 0,
+              totalTopics: 1,
+            },
+            source: 'chat_topic',
+          },
+          status: AsyncTaskStatus.Processing,
+          type: AsyncTaskType.UserMemoryExtractionWithChatTopic,
+          userId: otherUserId,
+        })
+        .returning();
+
+      const requested = await asyncTaskModel.isUserMemoryExtractionCancellationRequested(task.id);
+
+      expect(requested).toBe(false);
+
+      await serverDB.delete(users).where(eq(users.id, otherUserId));
+    });
+  });
+
+  describe('appendUserMemoryWorkflowRunIds', () => {
+    it('should append workflow run ids into hourly metadata control', async () => {
+      /**
+       * @example
+       * await asyncTaskModel.appendUserMemoryWorkflowRunIds(id, ['run-1']);
+       */
+      const task = await serverDB
+        .insert(asyncTasks)
+        .values({
+          metadata: {
+            progress: {
+              processedUsers: 0,
+              scheduledBatches: 0,
+              scheduledChildRuns: 0,
+            },
+            source: 'hourly_chat_topic',
+            startedAt: '2026-07-06T00:00:00.000Z',
+          },
+          status: AsyncTaskStatus.Processing,
+          type: AsyncTaskType.UserMemoryExtractionHourly,
+          userId,
+        })
+        .returning()
+        .then((res) => res[0]);
+
+      await asyncTaskModel.appendUserMemoryWorkflowRunIds(task.id, ['run-1']);
+
+      const updated = await serverDB.query.asyncTasks.findFirst({
+        where: eq(asyncTasks.id, task.id),
+      });
+      const metadata = updated?.metadata as HourlyUserMemoryExtractionMetadata | undefined;
+
+      expect(metadata?.control?.upstash?.workflowRunIds).toEqual(['run-1']);
+      expect(metadata?.progress).toEqual({
+        processedUsers: 0,
+        scheduledBatches: 0,
+        scheduledChildRuns: 0,
+      });
+    });
+
+    it('should append and dedupe workflow run ids without dropping existing metadata', async () => {
+      /**
+       * @example
+       * await asyncTaskModel.appendUserMemoryWorkflowRunIds(id, ['run-2']);
+       */
+      const task = await serverDB
+        .insert(asyncTasks)
+        .values({
+          metadata: {
+            control: {
+              cancelReason: 'operator_request',
+              upstash: {
+                workflowRunIds: ['run-1'],
+              },
+            },
+            cursor: {
+              createdAt: '2026-07-06T00:30:00.000Z',
+              id: 'cursor-user-id',
+            },
+            progress: {
+              processedUsers: 2,
+              scheduledBatches: 1,
+              scheduledChildRuns: 1,
+            },
+            source: 'hourly_chat_topic',
+            startedAt: '2026-07-06T00:00:00.000Z',
+          },
+          status: AsyncTaskStatus.Processing,
+          type: AsyncTaskType.UserMemoryExtractionHourly,
+          userId,
+        })
+        .returning()
+        .then((res) => res[0]);
+
+      await asyncTaskModel.appendUserMemoryWorkflowRunIds(task.id, ['run-2', 'run-1']);
+
+      const updated = await serverDB.query.asyncTasks.findFirst({
+        where: eq(asyncTasks.id, task.id),
+      });
+      const metadata = updated?.metadata as HourlyUserMemoryExtractionMetadata | undefined;
+
+      expect(metadata).toMatchObject({
+        control: {
+          cancelReason: 'operator_request',
+          upstash: {
+            workflowRunIds: ['run-1', 'run-2'],
+          },
+        },
+        cursor: {
+          createdAt: '2026-07-06T00:30:00.000Z',
+          id: 'cursor-user-id',
+        },
+        progress: {
+          processedUsers: 2,
+          scheduledBatches: 1,
+          scheduledChildRuns: 1,
+        },
+        source: 'hourly_chat_topic',
+      });
+    });
+
+    it('should ignore an empty workflow run id list', async () => {
+      /**
+       * @example
+       * await asyncTaskModel.appendUserMemoryWorkflowRunIds(id, []);
+       */
+      const task = await serverDB
+        .insert(asyncTasks)
+        .values({
+          metadata: {
+            progress: {
+              processedUsers: 0,
+              scheduledBatches: 0,
+              scheduledChildRuns: 0,
+            },
+            source: 'hourly_chat_topic',
+            startedAt: '2026-07-06T00:00:00.000Z',
+          },
+          status: AsyncTaskStatus.Pending,
+          type: AsyncTaskType.UserMemoryExtractionHourly,
+          userId,
+        })
+        .returning()
+        .then((res) => res[0]);
+
+      await asyncTaskModel.appendUserMemoryWorkflowRunIds(task.id, []);
+
+      const updated = await serverDB.query.asyncTasks.findFirst({
+        where: eq(asyncTasks.id, task.id),
+      });
+
+      expect(updated?.metadata).toEqual(task.metadata);
+    });
+  });
+
+  describe('markHourlyMemoryExtractionSuccess', () => {
+    it('should mark an hourly task as success and persist final scheduling progress', async () => {
+      const task = await serverDB
+        .insert(asyncTasks)
+        .values({
+          metadata: {
+            progress: {
+              processedUsers: 0,
+              scheduledBatches: 0,
+              scheduledChildRuns: 0,
+            },
+            source: 'hourly_chat_topic',
+            startedAt: '2026-07-06T00:00:00.000Z',
+          },
+          status: AsyncTaskStatus.Pending,
+          type: AsyncTaskType.UserMemoryExtractionHourly,
+          userId,
+        })
+        .returning()
+        .then((res) => res[0]);
+
+      await asyncTaskModel.markHourlyMemoryExtractionSuccess(task.id, {
+        processedUsers: 21,
+        scheduledBatches: 2,
+        scheduledChildRuns: 2,
+        status: AsyncTaskStatus.Success,
+      });
+
+      const updated = await serverDB.query.asyncTasks.findFirst({
+        where: eq(asyncTasks.id, task.id),
+      });
+      const metadata = updated?.metadata as HourlyUserMemoryExtractionMetadata | undefined;
+
+      expect(updated?.status).toBe(AsyncTaskStatus.Success);
+      expect(metadata?.progress).toEqual({
+        processedUsers: 21,
+        scheduledBatches: 2,
+        scheduledChildRuns: 2,
+      });
+    });
+  });
+
+  describe('isHourlyMemoryExtractionCancellationRequested', () => {
+    it('should return true for a cancelled hourly memory extraction task', async () => {
+      /**
+       * @example
+       * expect(requested).toBe(true);
+       */
+      const task = await serverDB
+        .insert(asyncTasks)
+        .values({
+          metadata: {
+            control: {
+              cancelRequestedAt: '2026-07-06T01:00:00.000Z',
+            },
+            progress: {
+              processedUsers: 0,
+              scheduledBatches: 0,
+              scheduledChildRuns: 0,
+            },
+            source: 'hourly_chat_topic',
+            startedAt: '2026-07-06T00:00:00.000Z',
+          },
+          status: AsyncTaskStatus.Processing,
+          type: AsyncTaskType.UserMemoryExtractionHourly,
+          userId,
+        })
+        .returning()
+        .then((res) => res[0]);
+
+      const requested = await asyncTaskModel.isHourlyMemoryExtractionCancellationRequested(task.id);
+
+      expect(requested).toBe(true);
+    });
+
+    it('should return false for a manual memory extraction task even if cancelled', async () => {
+      /**
+       * @example
+       * expect(requested).toBe(false);
+       */
+      const task = await serverDB
+        .insert(asyncTasks)
+        .values({
+          metadata: {
+            control: {
+              cancelRequestedAt: '2026-07-06T01:00:00.000Z',
+            },
+            progress: {
+              completedTopics: 0,
+              totalTopics: 1,
+            },
+            source: 'chat_topic',
+          },
+          status: AsyncTaskStatus.Processing,
+          type: AsyncTaskType.UserMemoryExtractionWithChatTopic,
+          userId,
+        })
+        .returning()
+        .then((res) => res[0]);
+
+      const requested = await asyncTaskModel.isHourlyMemoryExtractionCancellationRequested(task.id);
+
+      expect(requested).toBe(false);
+    });
+  });
 });
 
 describe('initUserMemoryExtractionMetadata', () => {
@@ -286,6 +652,7 @@ describe('initUserMemoryExtractionMetadata', () => {
     const result = initUserMemoryExtractionMetadata(undefined);
 
     expect(result).toEqual({
+      control: undefined,
       progress: {
         completedTopics: 0,
         totalTopics: null,
@@ -299,6 +666,7 @@ describe('initUserMemoryExtractionMetadata', () => {
     const result = initUserMemoryExtractionMetadata();
 
     expect(result).toEqual({
+      control: undefined,
       progress: {
         completedTopics: 0,
         totalTopics: null,
@@ -318,6 +686,7 @@ describe('initUserMemoryExtractionMetadata', () => {
     });
 
     expect(result).toEqual({
+      control: undefined,
       progress: {
         completedTopics: 5,
         totalTopics: 10,
@@ -339,6 +708,7 @@ describe('initUserMemoryExtractionMetadata', () => {
     });
 
     expect(result).toEqual({
+      control: undefined,
       progress: {
         completedTopics: 3,
         totalTopics: 7,
@@ -380,6 +750,129 @@ describe('initUserMemoryExtractionMetadata', () => {
 
     expect(result.source).toBe('chat_topic');
   });
+
+  it('should preserve a full control block including upstash workflowRunIds', () => {
+    const cancelRequestedAt = new Date().toISOString();
+    const result = initUserMemoryExtractionMetadata({
+      control: {
+        cancelReason: 'user_requested',
+        cancelRequestedAt,
+        cancelledBy: 'user-1',
+        upstash: {
+          entryWorkflowRunId: 'entry-run',
+          workflowRunIds: ['run-1', 'run-2'],
+        },
+      },
+      progress: {
+        completedTopics: 1,
+        totalTopics: 4,
+      },
+      source: 'chat_topic',
+    } as any);
+
+    expect(result.control).toEqual({
+      cancelReason: 'user_requested',
+      cancelRequestedAt,
+      cancelledBy: 'user-1',
+      upstash: {
+        entryWorkflowRunId: 'entry-run',
+        workflowRunIds: ['run-1', 'run-2'],
+      },
+    });
+    expect(result.progress).toEqual({ completedTopics: 1, totalTopics: 4 });
+  });
+
+  it('should default upstash workflowRunIds to an empty array when missing', () => {
+    const result = initUserMemoryExtractionMetadata({
+      control: {
+        cancelRequestedAt: new Date().toISOString(),
+        upstash: {},
+      },
+      progress: {
+        completedTopics: 0,
+        totalTopics: null,
+      },
+      source: 'chat_topic',
+    } as any);
+
+    expect(result.control?.upstash).toEqual({ workflowRunIds: [] });
+  });
+
+  it('should leave upstash undefined when control has no upstash field', () => {
+    const result = initUserMemoryExtractionMetadata({
+      control: {
+        cancelRequestedAt: new Date().toISOString(),
+      },
+      progress: {
+        completedTopics: 0,
+        totalTopics: null,
+      },
+      source: 'chat_topic',
+    } as any);
+
+    expect(result.control).toBeDefined();
+    expect(result.control?.upstash).toBeUndefined();
+  });
+});
+
+describe('initHourlyUserMemoryExtractionMetadata', () => {
+  it('should return default hourly metadata with startedAt and empty progress', () => {
+    /**
+     * @example
+     * expect(initHourlyUserMemoryExtractionMetadata({ startedAt })).toMatchObject({
+     *   source: 'hourly_chat_topic',
+     * });
+     */
+    const startedAt = '2026-07-06T00:00:00.000Z';
+
+    const result = initHourlyUserMemoryExtractionMetadata({ startedAt });
+
+    expect(result).toEqual({
+      control: undefined,
+      cursor: undefined,
+      progress: {
+        processedUsers: 0,
+        scheduledBatches: 0,
+        scheduledChildRuns: 0,
+      },
+      source: 'hourly_chat_topic',
+      startedAt,
+    });
+  });
+
+  it('should preserve hourly control workflow run ids', () => {
+    /**
+     * @example
+     * expect(result.control?.upstash?.workflowRunIds).toEqual(['run-1']);
+     */
+    const result = initHourlyUserMemoryExtractionMetadata({
+      control: {
+        cancelReason: 'operator_request',
+        cancelRequestedAt: '2026-07-06T01:00:00.000Z',
+        cancelledBy: 'webhook',
+        upstash: { entryWorkflowRunId: 'entry-run', workflowRunIds: ['run-1'] },
+      },
+      progress: {
+        processedUsers: 4,
+        scheduledBatches: 2,
+        scheduledChildRuns: 3,
+      },
+      source: 'hourly_chat_topic',
+      startedAt: '2026-07-06T00:00:00.000Z',
+    });
+
+    expect(result.control).toEqual({
+      cancelReason: 'operator_request',
+      cancelRequestedAt: '2026-07-06T01:00:00.000Z',
+      cancelledBy: 'webhook',
+      upstash: { entryWorkflowRunId: 'entry-run', workflowRunIds: ['run-1'] },
+    });
+    expect(result.progress).toEqual({
+      processedUsers: 4,
+      scheduledBatches: 2,
+      scheduledChildRuns: 3,
+    });
+  });
 });
 
 describe('AsyncTaskModel.findByInferenceId', () => {
@@ -405,5 +898,57 @@ describe('AsyncTaskModel.findByInferenceId', () => {
       '00000000-0000-0000-0000-000000000000',
     );
     expect(result).toBeUndefined();
+  });
+});
+
+describe('AsyncTaskModel.claimVideoCompletion', () => {
+  it('should atomically claim an active video task once and preserve metadata', async () => {
+    const [task] = await serverDB
+      .insert(asyncTasks)
+      .values({
+        metadata: { webhookToken: 'secret-token' },
+        status: AsyncTaskStatus.Processing,
+        type: AsyncTaskType.VideoGeneration,
+        userId,
+      })
+      .returning();
+
+    const firstClaim = await AsyncTaskModel.claimVideoCompletion(
+      serverDB,
+      task.id,
+      'webhook-event-1',
+    );
+    const duplicateClaim = await AsyncTaskModel.claimVideoCompletion(
+      serverDB,
+      task.id,
+      'webhook-event-2',
+    );
+
+    const claimedTask = await serverDB.query.asyncTasks.findFirst({
+      where: eq(asyncTasks.id, task.id),
+    });
+
+    expect(firstClaim).toBe(true);
+    expect(duplicateClaim).toBe(false);
+    expect(claimedTask?.metadata).toMatchObject({
+      completionEventId: 'webhook-event-1',
+      webhookToken: 'secret-token',
+    });
+    expect(
+      (claimedTask?.metadata as { completionClaimedAt?: string } | undefined)?.completionClaimedAt,
+    ).toBeTypeOf('string');
+  });
+
+  it('should not claim a terminal video task', async () => {
+    const [task] = await serverDB
+      .insert(asyncTasks)
+      .values({
+        status: AsyncTaskStatus.Success,
+        type: AsyncTaskType.VideoGeneration,
+        userId,
+      })
+      .returning();
+
+    await expect(AsyncTaskModel.claimVideoCompletion(serverDB, task.id)).resolves.toBe(false);
   });
 });

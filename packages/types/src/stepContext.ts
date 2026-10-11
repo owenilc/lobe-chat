@@ -15,7 +15,7 @@ export type StepContextTodoStatus = 'todo' | 'processing' | 'completed';
 
 /**
  * Todo item structure
- * Duplicated here to avoid circular dependency with builtin-tool-gtd
+ * Duplicated here to avoid circular dependency with builtin-tool-lobe-agent
  */
 export interface StepContextTodoItem {
   status: StepContextTodoStatus;
@@ -35,7 +35,12 @@ export interface StepContextTodos {
  */
 export interface StepActivatedSkill {
   description?: string;
-  id: string;
+  /**
+   * DB skill id. Absent for filesystem (project/device) and builtin skill
+   * activations, whose persisted state carries no id — consumers match by
+   * `name` (the server exec paths resolve archives/project skills by name).
+   */
+  id?: string;
   name: string;
 }
 
@@ -75,10 +80,43 @@ export interface InitialPageEditorContext {
 }
 
 /**
+ * Active topic document context
+ * Captured when a user leaves the topic page editor but continues the same
+ * topic conversation from the regular chat surface.
+ */
+export interface RuntimeActiveTopicDocumentContext {
+  /**
+   * Agent-document row ID used by lobe-agent-documents read/patch/edit APIs.
+   */
+  agentDocumentId?: string;
+  /**
+   * Underlying documents.id used by topic page routes.
+   */
+  documentId: string;
+  /**
+   * Optional send-time document snapshot.
+   *
+   * This lets non-page surfaces, such as an agent-document floating panel,
+   * provide the current document body without enabling PageAgent editor tools.
+   */
+  snapshot?: InitialPageEditorContext;
+  /**
+   * Human-readable title for model disambiguation.
+   */
+  title?: string | null;
+}
+
+/**
  * User-selected skill context for the current request
  * Captured from slash-menu skill action tags before send
  */
 export interface RuntimeSelectedSkill {
+  /**
+   * Preloaded skill content (markdown instructions).
+   * When present, injected directly into user message instead of
+   * constructing fake activateSkill tool-call preload messages.
+   */
+  content?: string;
   /**
    * Skill identifier used by runtime/tooling
    */
@@ -94,6 +132,12 @@ export interface RuntimeSelectedSkill {
  * Captured from slash-menu tool action tags before send
  */
 export interface RuntimeSelectedTool {
+  /**
+   * Preloaded tool context (systemRole + API descriptions).
+   * When present, injected directly into user message instead of relying on
+   * LLM to discover/activate the tool at runtime — saves tokens.
+   */
+  content?: string;
   /**
    * Tool identifier used by runtime/tooling
    */
@@ -126,10 +170,16 @@ export interface RuntimeStepContext {
    */
   activatedSkills?: StepActivatedSkill[];
   /**
-   * Activated tool identifiers accumulated from lobe-tools messages
+   * Activated tool identifiers accumulated from lobe-activator messages
    * Tools once activated remain active for the rest of the conversation
    */
   activatedToolIds?: string[];
+  /**
+   * Whether there are queued user messages waiting to be processed.
+   * When true after tool completion, the agent should finish early
+   * so the queued messages can be sent as a new operation.
+   */
+  hasQueuedMessages?: boolean;
   /**
    * Page Editor context for current step
    * Contains the latest XML structure fetched at each step
@@ -137,7 +187,7 @@ export interface RuntimeStepContext {
   stepPageEditor?: StepPageEditorContext;
   /**
    * Current todo list state
-   * Computed from the latest GTD tool message in the conversation
+   * Computed from the latest lobe-agent tool message in the conversation
    */
   todos?: StepContextTodos;
 }
@@ -153,12 +203,46 @@ export interface RuntimeMentionedAgent {
 }
 
 /**
+ * A slim tool manifest injected at runtime by callers (e.g. @mention → callAgent).
+ * Structurally compatible with LobeToolManifest from @lobechat/context-engine
+ * without requiring a cross-package import.
+ */
+export interface InjectedToolManifest {
+  api: Array<{
+    description: string;
+    name: string;
+    parameters: Record<string, any>;
+  }>;
+  identifier: string;
+  meta: { description?: string; title?: string };
+  systemRole?: string;
+  type?: 'builtin' | 'default' | 'markdown' | 'mcp' | 'standalone';
+}
+
+/**
  * Initial Context
  *
  * Contains state captured at operation initialization.
  * Remains constant throughout the operation lifecycle.
  */
 export interface RuntimeInitialContext {
+  /**
+   * Active topic document carried from page route to regular chat route.
+   * This lets the model continue document work without page-editor tools.
+   */
+  activeTopicDocument?: RuntimeActiveTopicDocumentContext;
+  /**
+   * Goal progress overview, built from the goal detail page the user is
+   * currently viewing. Injected into the last user message so the LLM can
+   * answer progress questions about the goal without extra tool calls.
+   */
+  goalOverview?: InitialGoalOverviewContext;
+  /**
+   * Ad-hoc tool manifests injected by callers for the current request.
+   * Merged into the tool resolution output without passing through ToolsEngine.
+   * Deduplication: manifests whose identifier already appears in enabledToolIds are skipped.
+   */
+  injectedManifests?: InjectedToolManifest[];
   /**
    * Agents explicitly @mentioned by the user in the input editor.
    * When present in a non-group conversation, the current agent acts as
@@ -180,4 +264,44 @@ export interface RuntimeInitialContext {
    * This constrains the available tools for the current runtime execution
    */
   selectedTools?: RuntimeSelectedTool[];
+  /**
+   * Task Manager page context, built from the tasks list/detail page the user
+   * is currently viewing. Injected into the last user message so the LLM can
+   * answer questions about the on-screen tasks without extra tool calls.
+   */
+  taskManager?: InitialTaskManagerContext;
+}
+
+export interface InitialTaskManagerContext {
+  /** Prebuilt prompt describing the tasks shown on the page. */
+  contextPrompt: string;
+}
+
+export interface GoalOverviewTaskItem {
+  /** 1-based attempt count so far, when known. */
+  attempts?: number;
+  /** 1-based Task number as shown in the UI (#1, #2 …). */
+  seq?: number;
+  status: string;
+  title: string;
+}
+
+export interface GoalOverviewDecision {
+  question: string;
+}
+
+/**
+ * Structured snapshot of the goal the user is viewing. Producers (goal page /
+ * server pipeline) pass the data; the context-engine injector owns turning it
+ * into prompt text, so wording changes never touch the transports.
+ */
+export interface InitialGoalOverviewContext {
+  findings: string[];
+  goal: {
+    requirement?: string | null;
+    status: string;
+    title: string;
+  };
+  pendingDecisions: GoalOverviewDecision[];
+  tasks: GoalOverviewTaskItem[];
 }

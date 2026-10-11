@@ -4,8 +4,11 @@ import type { OpenAIChatMessage } from '@/types/index';
 
 import { ContextEngine } from '../../pipeline';
 import {
+  ActivationResultTrimProcessor,
   AgentCouncilFlattenProcessor,
+  cacheEconomicsForProvider,
   CompressedGroupRoleTransformProcessor,
+  DisabledToolCallFilter,
   GroupMessageFlattenProcessor,
   GroupOrchestrationFilterProcessor,
   GroupRoleTransformProcessor,
@@ -13,43 +16,75 @@ import {
   InputTemplateProcessor,
   MessageCleanupProcessor,
   MessageContentProcessor,
+  PlaceholderMessageFilterProcessor,
   PlaceholderVariablesProcessor,
   ReactionFeedbackProcessor,
+  StaleToolResultTrimProcessor,
   SupervisorRoleRestoreProcessor,
+  TaskCallbackMessageProcessor,
   TaskMessageProcessor,
   TasksFlattenProcessor,
   ToolCallProcessor,
   ToolMessageReorder,
+  VerifyMessageProcessor,
 } from '../../processors';
 import {
+  ActiveTopicDocumentContextInjector,
   AgentBuilderContextInjector,
-  AgentDocumentInjector,
+  AgentDocumentBeforeSystemInjector,
+  AgentDocumentContextInjector,
+  AgentDocumentMessageInjector,
+  AgentDocumentSystemAppendInjector,
+  AgentDocumentSystemReplaceInjector,
+  AgentIdentityInjector,
   AgentManagementContextInjector,
+  BotPlatformContextInjector,
+  ConnectorOwnershipInjector,
+  ContextSelectionsInjector,
   DiscordContextProvider,
   EvalContextSystemInjector,
+  ExpertiseContextInjector,
   ForceFinishSummaryInjector,
+  GoalContextSyntheticInjector,
   GroupAgentBuilderContextInjector,
   GroupContextInjector,
-  GTDPlanInjector,
-  GTDTodoInjector,
   HistorySummaryProvider,
   KnowledgeInjector,
+  LocalSystemToolSnapshotInjector,
+  ModelInfoProvider,
+  OnboardingActionHintInjector,
+  OnboardingContextInjector,
+  OnboardingSyntheticStateInjector,
   PageEditorContextInjector,
   PageSelectionsInjector,
+  PlanInjector,
+  ProjectInstructionsInjector,
+  RuntimeAdditionalContextProvider,
+  selectActivatedSkills,
   SelectedSkillInjector,
+  selectToolPromptManifests,
+  SKILL_STORE_TOOL_ID,
   SkillContextProvider,
+  SkillImportRouteInjector,
   SystemDateProvider,
   SystemRoleInjector,
+  TaskManagerContextInjector,
+  TodoInjector,
   ToolDiscoveryProvider,
   ToolSystemRoleProvider,
   TopicReferenceContextInjector,
   UserMemoryInjector,
+  WorkspaceContextInjector,
 } from '../../providers';
+import { SelectedToolInjector } from '../../providers/SelectedToolInjector';
 import type { ContextProcessor } from '../../types';
 import { ToolNameResolver } from '../tools';
 import type { MessagesEngineParams, MessagesEngineResult } from './types';
 
 const log = debug('context-engine:MessagesEngine');
+
+/** `AttachmentsIdentifier` from `@lobechat/builtin-tool-attachments`, inlined to avoid a package cycle */
+const ATTACHMENTS_TOOL_ID = 'lobe-attachments';
 
 /**
  * MessagesEngine - High-level message processing engine
@@ -122,10 +157,15 @@ export class MessagesEngine {
   private buildProcessors(): ContextProcessor[] {
     const {
       model,
+      modelDisplayName,
+      modelKnowledgeCutoff,
       provider,
       systemRole,
+      agentIdentity,
       inputTemplate,
+      enableAgentMode,
       enableHistoryCount,
+      enableStaleToolResultTrim,
       historyCount,
       forceFinish,
       historySummary,
@@ -133,6 +173,7 @@ export class MessagesEngine {
       knowledge,
       skillsConfig,
       selectedSkills,
+      selectedTools,
       toolDiscoveryConfig,
       toolsConfig,
       capabilities,
@@ -140,13 +181,19 @@ export class MessagesEngine {
       fileContext,
       messages,
       agentBuilderContext,
+      botPlatformContext,
+      workspaceContext,
       discordContext,
+      connectorOwnershipNote,
       evalContext,
+      projectInstructions,
+      onboardingContext,
       agentManagementContext,
       groupAgentBuilderContext,
+      additionalContexts,
       agentGroup,
       agentDocuments,
-      gtd,
+      planTodo,
       userMemory,
       initialContext,
       stepContext,
@@ -157,21 +204,35 @@ export class MessagesEngine {
     } = this.params;
 
     const isAgentBuilderEnabled = !!agentBuilderContext;
-    const isAgentManagementEnabled = !!agentManagementContext;
 
     const isGroupAgentBuilderEnabled = !!groupAgentBuilderContext;
     const isAgentGroupEnabled = agentGroup?.agentMap && Object.keys(agentGroup.agentMap).length > 0;
     const isGroupContextEnabled =
       isAgentGroupEnabled || !!agentGroup?.currentAgentId || !!agentGroup?.members;
-    const isUserMemoryEnabled = userMemory?.enabled && userMemory?.memories;
+    const isUserMemoryEnabled = !!(userMemory?.enabled && userMemory?.memories);
     const hasSelectedSkills = (selectedSkills?.length ?? 0) > 0;
+    const hasSelectedTools = (selectedTools?.length ?? 0) > 0;
 
-    const hasAgentDocuments = !!agentDocuments && agentDocuments.length > 0;
+    // Chat mode (`enableAgentMode === false`) suppresses agentic-only injectors:
+    // skill discovery (<available_skills>), agent documents, and the
+    // agent-management context (<current_agent> + <available_agents>).
+    // Anything else — system role, knowledge bases, memory, web-browsing tool
+    // prompts — remains untouched.
+    const isAgentMode = enableAgentMode !== false;
+    const isAgentManagementEnabled = !!agentManagementContext && isAgentMode;
+    const hasAgentDocuments = !!agentDocuments && agentDocuments.length > 0 && isAgentMode;
     // Page editor is enabled if either direct pageContentContext or initialContext.pageEditor is provided
     const isPageEditorEnabled = !!pageContentContext || !!initialContext?.pageEditor;
-    // GTD is enabled if gtd.enabled is true and either plan or todos is provided
-    const isGTDPlanEnabled = gtd?.enabled && gtd?.plan;
-    const isGTDTodoEnabled = gtd?.enabled && gtd?.todos;
+    const hasActiveTopicDocument = !!initialContext?.activeTopicDocument;
+    // Runtime message state is authoritative, including an empty clear tombstone.
+    const isPlanEnabled = planTodo?.enabled && planTodo?.plan;
+    const effectiveTodos =
+      stepContext?.todos !== undefined
+        ? stepContext.todos
+        : planTodo?.enabled
+          ? planTodo.todos
+          : undefined;
+    const isTodoEnabled = effectiveTodos !== undefined;
 
     // System date is redundant when web-browsing or memory tools are enabled,
     // as they already include current date in their system prompts
@@ -182,44 +243,147 @@ export class MessagesEngine {
     const currentUserMessage = [...messages]
       .reverse()
       .find((m) => m.role === 'user' && typeof m.content === 'string')?.content as
-      | string
-      | undefined;
+      string | undefined;
+
+    // Mirror the injection gates of SkillContextProvider / ToolSystemRoleProvider
+    // (enable flags + FC support + the shared select predicates) so
+    // ActivationResultTrimProcessor only trims activation tool results whose full
+    // documentation is confirmed to be injected into the system prompt for this
+    // request.
+    const canUseFC = capabilities?.isCanUseFC || (() => true);
+    // Oversized file previews may only promise `readAttachment` when the model is actually sent that
+    // tool; custom / exclusive tool modes, share visitors and clients without it get a plain preview.
+    const canReadAttachment = toolIds.includes(ATTACHMENTS_TOOL_ID) && !!canUseFC(model, provider);
+    const injectedActivatedSkills =
+      isAgentMode && (skillsConfig?.enabledSkills?.length ?? 0) > 0
+        ? selectActivatedSkills(skillsConfig?.enabledSkills)
+        : [];
+    const injectedToolManifests =
+      (toolsConfig?.manifests?.length ?? 0) > 0 && !!canUseFC(model, provider)
+        ? selectToolPromptManifests(toolsConfig?.manifests)
+        : [];
+
+    // The skill-import route is only actionable when the Skill Store is reachable this
+    // run — either already enabled, or listed for the activator to turn on.
+    const isSkillStoreReachable =
+      (toolsConfig?.manifests ?? []).some((m) => m.identifier === SKILL_STORE_TOOL_ID) ||
+      (toolDiscoveryConfig?.availableTools ?? []).some((t) => t.identifier === SKILL_STORE_TOOL_ID);
+
+    // Shared config for all agent document injectors
+    const agentDocConfig = {
+      currentUserMessage,
+      documents: agentDocuments,
+      enabled: hasAgentDocuments,
+    };
 
     return [
       // =============================================
-      // Phase 0: History Truncation (FIRST - truncate before any processing)
+      // Phase 0: Placeholder Residue Filtering
+      // Drop failed/abandoned assistant placeholders ("..." rows) BEFORE
+      // truncation so residue never consumes history slots and never lands
+      // at the payload tail (Claude 4.6+ rejects trailing assistant turns)
       // =============================================
 
-      // 0. History truncate (limit message count based on configuration)
-      // This MUST be first to ensure subsequent processors only work with truncated messages
-      new HistoryTruncateProcessor({
-        enableHistoryCount,
-        historyCount,
-      }),
+      new PlaceholderMessageFilterProcessor(),
 
       // =============================================
-      // Phase 1: System Role Injection
+      // Phase 1: History Truncation
+      // MUST run first — all subsequent processors work on truncated messages only
       // =============================================
 
-      // 1. System role injection (agent's system role)
+      new HistoryTruncateProcessor({ enableHistoryCount, historyCount }),
+
+      // =============================================
+      // Phase 2: System Message Assembly
+      // Each provider appends content to a single system message via BaseSystemRoleProvider
+      // =============================================
+
+      // Agent documents → before system (prepend as separate system message)
+      new AgentDocumentBeforeSystemInjector(agentDocConfig),
+      // Agent's system role (creates the initial system message)
       new SystemRoleInjector({ systemRole }),
-
-      // 2. Eval context injection (appends envPrompt to system message)
+      // Both sit directly after the persona because that is exactly where they
+      // used to be: the server concatenated them onto `agentConfig.systemRole`
+      // several pipeline stages before the engine ran. Moving them later would
+      // push them behind every other Phase 2 provider.
+      //
+      // Connector attribution precedes the project instructions because
+      // `discoverTools` runs before `prepareOperation` in the agent pipeline,
+      // so that is the order the appends produced. Reversing these two changes
+      // which block the model reads last.
+      new ConnectorOwnershipInjector({ note: connectorOwnershipNote }),
+      new ProjectInstructionsInjector({ instructions: projectInstructions }),
+      // Agent identity (name/title) — lets the model answer "who are you?"
+      // with the user-given name. Group chat establishes identity through
+      // GroupContextInjector instead, so it is suppressed there.
+      new AgentIdentityInjector({
+        enabled: !isGroupContextEnabled,
+        identity: agentIdentity,
+      }),
+      // Eval context (appends envPrompt)
       new EvalContextSystemInjector({ enabled: !!evalContext?.envPrompt, evalContext }),
-
-      // 3. System date injection (appends current date to system message)
+      // Bot platform context (formatting instructions for non-Markdown platforms)
+      new BotPlatformContextInjector({
+        context: botPlatformContext,
+        enabled: !!botPlatformContext,
+      }),
+      // System date
       new SystemDateProvider({ enabled: isSystemDateEnabled, timezone }),
+      // Model info (name / id / knowledge cutoff)
+      new ModelInfoProvider({
+        displayName: modelDisplayName,
+        knowledgeCutoff: modelKnowledgeCutoff,
+        modelId: model,
+        nativeMediaCapabilities: {
+          audio: capabilities?.isCanUseAudio?.(model, provider),
+          video: capabilities?.isCanUseVideo?.(model, provider),
+          vision: capabilities?.isCanUseVision?.(model, provider),
+        },
+      }),
+      // Workspace context (app origin + workspace slug → correct in-app links).
+      // Sits with the other environment facts (date / model) after the
+      // persona-level injectors.
+      new WorkspaceContextInjector({
+        context: workspaceContext,
+        enabled: !!workspaceContext,
+      }),
+      // Skill context (available skills list + activated skill content).
+      // Disabled in chat mode — pairs with the tools-engine gate so the LLM
+      // sees neither the manifests nor the discovery prompt.
+      new SkillContextProvider({
+        enabled:
+          isAgentMode && !!(skillsConfig?.enabledSkills && skillsConfig.enabledSkills.length > 0),
+        enabledSkills: skillsConfig?.enabledSkills,
+      }),
+      // Tool system role (tool manifests and API definitions)
+      new ToolSystemRoleProvider({
+        enabled: !!(toolsConfig?.manifests && toolsConfig.manifests.length > 0),
+        isCanUseFC: capabilities?.isCanUseFC || (() => true),
+        manifests: toolsConfig?.manifests,
+        model,
+        provider,
+      }),
+      // History summary (conversation summary from compression)
+      new HistorySummaryProvider({ formatHistorySummary, historySummary }),
+      // Agent documents → append to system message
+      new AgentDocumentSystemAppendInjector(agentDocConfig),
+      // Agent documents → replace entire system message (destructive, runs last)
+      new AgentDocumentSystemReplaceInjector(agentDocConfig),
 
       // =============================================
-      // Phase 2: First User Message Context Injection
-      // These providers inject content before the first user message
+      // Phase 3: Context Injection (before first user message)
+      // Providers consolidate into a single injection message via BaseFirstUserContentProvider
       // Order matters: first executed = first in content
       // =============================================
 
-      // 4. User memory injection (conditionally added, injected first)
-      ...(isUserMemoryEnabled ? [new UserMemoryInjector(userMemory)] : []),
-
-      // 5. Group context injection (agent identity and group info for multi-agent chat)
+      // User memory
+      new UserMemoryInjector({ ...userMemory, enabled: isUserMemoryEnabled }),
+      // Operation-scoped learned expertise (captured once and reused verbatim across steps)
+      new ExpertiseContextInjector({
+        enabled: this.params.enableExpertise,
+        expertise: this.params.expertise,
+      }),
+      // Group context (agent identity and group info for multi-agent chat)
       new GroupContextInjector({
         currentAgentId: agentGroup?.currentAgentId,
         currentAgentName: agentGroup?.currentAgentName,
@@ -229,95 +393,73 @@ export class MessagesEngine {
         members: agentGroup?.members,
         systemPrompt: agentGroup?.systemPrompt,
       }),
-
-      // 5.5. Discord context injection (channel/guild info for Discord bot scenarios)
-      ...(discordContext
-        ? [new DiscordContextProvider({ context: discordContext, enabled: true })]
-        : []),
-
-      // 6. GTD Plan injection (conditionally added, after user memory, before knowledge)
-      ...(isGTDPlanEnabled ? [new GTDPlanInjector({ enabled: true, plan: gtd.plan })] : []),
-
-      // 7. Knowledge injection (full content for agent files + metadata for knowledge bases)
+      // Discord context (channel/guild info)
+      new DiscordContextProvider({ context: discordContext, enabled: !!discordContext }),
+      // Plan (high-level plan document)
+      new PlanInjector({ enabled: !!isPlanEnabled, plan: planTodo?.plan }),
+      // Knowledge (agent files + knowledge bases)
       new KnowledgeInjector({
+        canReadAttachment,
         fileContents: knowledge?.fileContents,
         knowledgeBases: knowledge?.knowledgeBases,
       }),
-
-      // 7.5 Agent document injection (policy-based autoload documents)
-      ...(hasAgentDocuments
-        ? [
-            new AgentDocumentInjector({
-              currentUserMessage,
-              documents: agentDocuments,
-            }),
-          ]
-        : []),
-
-      // 8. Tool Discovery context injection (available tools for dynamic activation)
-      ...(toolDiscoveryConfig?.availableTools && toolDiscoveryConfig.availableTools.length > 0
-        ? [new ToolDiscoveryProvider({ availableTools: toolDiscoveryConfig.availableTools })]
-        : []),
-
-      // =============================================
-      // Phase 3: Additional System Context
-      // =============================================
-
-      // 9. Agent Builder context injection (current agent config/meta for editing)
+      // Agent documents → before first user message
+      new AgentDocumentContextInjector(agentDocConfig),
+      // Tool Discovery (available tools for dynamic activation)
+      new ToolDiscoveryProvider({
+        availableTools: toolDiscoveryConfig?.availableTools,
+        enabled:
+          !!toolDiscoveryConfig?.availableTools && toolDiscoveryConfig.availableTools.length > 0,
+      }),
+      // Agent Builder context (current agent config/meta for editing)
       new AgentBuilderContextInjector({
         enabled: isAgentBuilderEnabled,
         agentContext: agentBuilderContext,
       }),
-
-      // 7. Agent Management context injection (available models and plugins for agent creation)
+      // Agent Management context (available models and plugins)
       new AgentManagementContextInjector({
         enabled: isAgentManagementEnabled,
         context: agentManagementContext,
       }),
-
-      // 8. Group Agent Builder context injection (current group config/members for editing)
+      // Group Agent Builder context (current group config/members for editing)
       new GroupAgentBuilderContextInjector({
         enabled: isGroupAgentBuilderEnabled,
         groupContext: groupAgentBuilderContext,
       }),
-
-      // 11. Skill context injection (conditionally added)
-      ...(skillsConfig?.enabledSkills && skillsConfig.enabledSkills.length > 0
-        ? [
-            new SkillContextProvider({
-              enabledSkills: skillsConfig.enabledSkills,
-            }),
-          ]
-        : []),
-
-      // 12. Tool system role injection (conditionally added)
-      ...(toolsConfig?.manifests && toolsConfig.manifests.length > 0
-        ? [
-            new ToolSystemRoleProvider({
-              isCanUseFC: capabilities?.isCanUseFC || (() => true),
-              manifests: toolsConfig.manifests,
-              model,
-              provider,
-            }),
-          ]
-        : []),
-
-      // 13. History summary injection
-      new HistorySummaryProvider({
-        formatHistorySummary,
-        historySummary,
+      // Onboarding context (phase guidance + document contents — stable, cacheable)
+      new OnboardingContextInjector({
+        enabled: !!onboardingContext?.phaseGuidance,
+        onboardingContext,
       }),
 
-      // 14. Selected skill injection (ephemeral user-selected slash skills for this request)
-      ...(hasSelectedSkills ? [new SelectedSkillInjector({ selectedSkills })] : []),
+      // =============================================
+      // Phase 4: User Message Augmentation
+      // Injects context into specific user messages (last user, selected, etc.)
+      // =============================================
 
-      // 15. Page Selections injection (inject user-selected text into each user message that has them)
+      // Agent documents → after-first-user, context-end
+      new AgentDocumentMessageInjector(agentDocConfig),
+      // Active topic document → last user message, for continuing document work outside page scope
+      new ActiveTopicDocumentContextInjector({
+        activeTopicDocument: initialContext?.activeTopicDocument,
+        enabled: hasActiveTopicDocument && !isPageEditorEnabled,
+      }),
+      // LobeHub skill URLs in the current message → route them to the Skill Store
+      // instead of letting the model crawl the page and follow its CLI steps.
+      new SkillImportRouteInjector({ enabled: isSkillStoreReachable }),
+      // Selected skills (ephemeral user-selected slash skills for this request)
+      new SelectedSkillInjector({ enabled: hasSelectedSkills, selectedSkills }),
+      // Selected tools (ephemeral user-selected @tool for this request)
+      new SelectedToolInjector({ enabled: hasSelectedTools, selectedTools }),
+      // Generic user-attached selections from chat/code/text contexts.
+      new ContextSelectionsInjector({ enabled: true }),
+      // Legacy page editor selections.
       new PageSelectionsInjector({ enabled: isPageEditorEnabled }),
-
-      // 16. Page Editor context injection (inject current page content to last user message)
+      // Local-system file snapshots (replay send-time @file reads as real tool results)
+      new LocalSystemToolSnapshotInjector({ enabled: true }),
+      // Page Editor context (inject current page content to last user message)
       new PageEditorContextInjector({
         enabled: isPageEditorEnabled,
-        // Use direct pageContentContext if provided (server-side), otherwise build from initialContext + stepContext (frontend)
         pageContentContext:
           pageContentContext ??
           (initialContext?.pageEditor
@@ -328,57 +470,80 @@ export class MessagesEngine {
                   lineCount: initialContext.pageEditor.metadata.lineCount,
                   title: initialContext.pageEditor.metadata.title,
                 },
-                // Use latest XML from stepContext if available, otherwise fallback to initial XML
                 xml: stepContext?.stepPageEditor?.xml || initialContext.pageEditor.xml,
               }
             : undefined),
       }),
-
-      // 17. GTD Todo injection (conditionally added, at end of last user message)
-      ...(isGTDTodoEnabled ? [new GTDTodoInjector({ enabled: true, todos: gtd.todos })] : []),
-
-      // 18. Topic Reference context injection (inject referenced topic summaries to last user message)
-      ...(topicReferences && topicReferences.length > 0
-        ? [
-            new TopicReferenceContextInjector({
-              enabled: true,
-              topicReferences,
-            }),
-          ]
-        : []),
-
-      // =============================================
-      // Phase 4: Message Transformation
-      // =============================================
-
-      // 17. Input template processing
-      new InputTemplateProcessor({ inputTemplate }),
-
-      // 18. Placeholder variables processing
-      new PlaceholderVariablesProcessor({
-        variableGenerators: variableGenerators || {},
+      // Task Manager page context (inject current tasks list/detail to last user message)
+      new TaskManagerContextInjector({
+        contextPrompt: initialContext?.taskManager?.contextPrompt,
+        enabled: !!initialContext?.taskManager?.contextPrompt,
+      }),
+      // Todo list (at end of last user message)
+      new TodoInjector({ enabled: isTodoEnabled, todos: effectiveTodos }),
+      // Topic Reference context (referenced topic summaries to last user message)
+      new TopicReferenceContextInjector({
+        enabled: !!(topicReferences && topicReferences.length > 0),
+        topicReferences,
       }),
 
-      // 19. AgentCouncil message flatten (convert role=agentCouncil to standard assistant + tool messages)
+      // =============================================
+      // Phase 4.5: Virtual Tail Guidance
+      // Inject high-churn runtime guidance at the tail to preserve stable prefix caching
+      // =============================================
+
+      // Goal progress overview (goal detail page conversation) — a synthetic
+      // getGoalContext tool pair after the last user message: environment
+      // state arrives as machine-provided tool output, not as user words.
+      new GoalContextSyntheticInjector({
+        enabled: !!initialContext?.goalOverview,
+        overview: initialContext?.goalOverview,
+      }),
+      // Onboarding synthetic state (fake getOnboardingState tool call pair to drive action loop)
+      new OnboardingSyntheticStateInjector({
+        enabled: !!onboardingContext?.phaseGuidance,
+        onboardingContext,
+      }),
+      // Onboarding action hints (phase-specific tool call reminders)
+      new OnboardingActionHintInjector({
+        enabled: !!onboardingContext?.phaseGuidance,
+        onboardingContext,
+      }),
+      new RuntimeAdditionalContextProvider({ additionalContexts }),
+
+      // =============================================
+      // Phase 5: Message Transformation
+      // Flattens group/task messages, applies templates and variables
+      // =============================================
+
+      // Input template processing
+      new InputTemplateProcessor({ inputTemplate }),
+      // AgentCouncil message flatten
       new AgentCouncilFlattenProcessor(),
-
-      // 20. Group message flatten (convert role=assistantGroup to standard assistant + tool messages)
+      // Group message flatten
       new GroupMessageFlattenProcessor(),
-
-      // 21. Tasks message flatten (convert role=tasks to individual task messages)
+      // Tasks message flatten
       new TasksFlattenProcessor(),
-
-      // 22. Task message processing (convert role=task to assistant with instruction + content)
+      // Task message processing
       new TaskMessageProcessor(),
-
-      // 23. Supervisor role restore (convert role=supervisor back to role=assistant for model)
+      // Second placeholder pass: the flatten steps above can expand "..."
+      // residue hidden inside group/council/tasks children (invisible to the
+      // Phase 0 pass, which only sees top-level messages), and
+      // TaskMessageProcessor converts flattened `task` rows into assistant
+      // messages — so this pass must run AFTER that conversion to catch
+      // task-shaped residue too.
+      new PlaceholderMessageFilterProcessor(),
+      // Verify (delivery-checker) cards: drop empty UI-only ones; surface
+      // auto-repair failure feedback as a user turn for the repair run
+      new VerifyMessageProcessor(),
+      // Task-callback cards: surface a finished task's handoff as a user turn
+      // so the creator agent reads it and continues
+      new TaskCallbackMessageProcessor(),
+      // Supervisor role restore
       new SupervisorRoleRestoreProcessor(),
-
-      // 24. Compressed group role transform (convert role=compressedGroup to role=user for model)
+      // Compressed group role transform
       new CompressedGroupRoleTransformProcessor(),
-
-      // 25. Group orchestration filter (remove supervisor's orchestration messages like broadcast/speak)
-      // This must be BEFORE GroupRoleTransformProcessor so we filter based on original agentId/tools
+      // Group orchestration filter (must run BEFORE GroupRoleTransformProcessor)
       ...(isAgentGroupEnabled && agentGroup.agentMap && agentGroup.currentAgentId
         ? [
             new GroupOrchestrationFilterProcessor({
@@ -386,14 +551,11 @@ export class MessagesEngine {
                 Object.entries(agentGroup.agentMap).map(([id, info]) => [id, { role: info.role }]),
               ),
               currentAgentId: agentGroup.currentAgentId,
-              // Only enabled when current agent is NOT supervisor (supervisor needs to see orchestration history)
               enabled: agentGroup.currentAgentRole !== 'supervisor',
             }),
           ]
         : []),
-
-      // 26. Group role transform (convert other agents' messages to user role with speaker tags)
-      // This must be BEFORE ToolCallProcessor so other agents' tool messages are converted first
+      // Group role transform (must run BEFORE ToolCallProcessor)
       ...(isAgentGroupEnabled && agentGroup.currentAgentId
         ? [
             new GroupRoleTransformProcessor({
@@ -402,38 +564,79 @@ export class MessagesEngine {
             }),
           ]
         : []),
+      // Dynamic-activation result trimming — replaces activateTools /
+      // activateSkill tool-result documents that are ALSO injected into the
+      // system prompt (by ToolSystemRoleProvider / SkillContextProvider above)
+      // with a short confirmation, so each activated document reaches the LLM
+      // payload exactly once. MUST run AFTER the flatten steps (grouped /
+      // compressed tool rows are only hoisted back to `role: 'tool'` with
+      // plugin/pluginState there) and BEFORE ToolCallProcessor.
+      new ActivationResultTrimProcessor({
+        injectedManifests: injectedToolManifests,
+        injectedSkills: injectedActivatedSkills,
+      }),
+      // Stale tool-result trimming — replaces the bodies of superseded tool
+      // results (file reads later overwritten, stale browser snapshots, old
+      // command output) with short placeholders. Rules are monotone so the
+      // trimmed prefix stays byte-stable across requests and the prompt-cache
+      // prefix survives; savings land at the operation boundary where the
+      // cache is cold anyway. Same pipeline position constraints as
+      // ActivationResultTrimProcessor above. Cache economics (TTL, read/write
+      // prices) follow the active provider.
+      new StaleToolResultTrimProcessor({
+        economics: cacheEconomicsForProvider(provider),
+        enabled: enableStaleToolResultTrim !== false,
+      }),
+      // Placeholder variables processing — MUST run AFTER all flatten / role
+      // transform steps. AssistantGroup / Supervisor messages keep their real
+      // content (including any `{{...}}` placeholders inside tool results)
+      // nested under `children[].tools[].result.content`. The flatten processors
+      // hoist that nested content into top-level `role: 'tool'` messages.
+      // PlaceholderVariablesProcessor only walks `message.content`, so it MUST
+      // run after the hoist or it would silently miss every placeholder buried
+      // inside an assistantGroup. (Regression discovered while wiring lobehub
+      // skill identity placeholders — see .)
+      new PlaceholderVariablesProcessor({ variableGenerators: variableGenerators || {} }),
 
       // =============================================
-      // Phase 5: Content Processing
+      // Phase 6: Content Processing
+      // Multimodal encoding, tool calls, reaction feedback
       // =============================================
 
-      // 27. Reaction feedback injection (append user reaction feedback to assistant messages)
+      // Reaction feedback
       new ReactionFeedbackProcessor({ enabled: true }),
-
-      // 28. Message content processing (image encoding, etc.)
+      // Message content processing (image encoding, multimodal)
       new MessageContentProcessor({
+        canReadAttachment,
         fileContext: fileContext || { enabled: true, includeFileUrl: true },
+        isCanUseAudio: capabilities?.isCanUseAudio || (() => false),
         isCanUseVideo: capabilities?.isCanUseVideo || (() => false),
         isCanUseVision: capabilities?.isCanUseVision || (() => true),
         model,
         provider,
       }),
-
-      // 29. Tool call processing
+      // Tool call processing
       new ToolCallProcessor({
         genToolCallingName: this.toolNameResolver.generate.bind(this.toolNameResolver),
         isCanUseFC: capabilities?.isCanUseFC || (() => true),
         model,
         provider,
       }),
+      // Disabled historical tool calls (for scope-specific tool removal)
+      new DisabledToolCallFilter({
+        disabledToolIdentifiers: toolsConfig?.disabledToolIdentifiers,
+      }),
 
-      // 30. Tool message reordering
+      // =============================================
+      // Phase 7: Cleanup
+      // Final reordering, force finish, and message cleanup
+      // =============================================
+
+      // Tool message reordering
       new ToolMessageReorder(),
-
-      // 31. Force finish summary injection (when maxSteps exceeded, inject summary prompt)
+      // Force finish summary (when maxSteps exceeded)
       new ForceFinishSummaryInjector({ enabled: !!forceFinish }),
-
-      // 32. Message cleanup (final step, keep only necessary fields)
+      // Message cleanup (final step)
       new MessageCleanupProcessor(),
     ];
   }

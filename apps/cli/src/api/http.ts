@@ -1,52 +1,130 @@
-import { getValidToken } from '../auth/refresh';
-import { OFFICIAL_SERVER_URL } from '../constants/urls';
-import { loadSettings } from '../settings';
+import { describeTokenLookup, getValidToken } from '../auth/refresh';
+import { CLI_API_KEY_ENV, readCliApiKeyEnv } from '../constants/auth';
+import { CLI_PRIMARY_BIN } from '../constants/identity';
+import { resolveServerUrl } from '../settings';
 import { log } from '../utils/logger';
-
-// Must match the server's SECRET_XOR_KEY (src/envs/auth.ts)
-const SECRET_XOR_KEY = 'LobeHub · LobeHub';
-
-/**
- * XOR-obfuscate a payload and encode as Base64.
- * The /webapi/* routes require `X-lobe-chat-auth` with this encoding.
- */
-function obfuscatePayloadWithXOR(payload: Record<string, any>): string {
-  const jsonString = JSON.stringify(payload);
-  const dataBytes = new TextEncoder().encode(jsonString);
-  const keyBytes = new TextEncoder().encode(SECRET_XOR_KEY);
-
-  const result = new Uint8Array(dataBytes.length);
-  for (let i = 0; i < dataBytes.length; i++) {
-    result[i] = dataBytes[i] ^ keyBytes[i % keyBytes.length];
-  }
-
-  return btoa(String.fromCharCode(...result));
-}
+import { withWorkspaceHeader } from './workspace';
 
 export interface AuthInfo {
   accessToken: string;
-  /** Headers required for /webapi/* endpoints (includes both X-lobe-chat-auth and Oidc-Auth) */
+  /** Headers required for /webapi/* endpoints (Oidc-Auth for authentication) */
   headers: Record<string, string>;
   serverUrl: string;
 }
 
-export async function getAuthInfo(): Promise<AuthInfo> {
+export async function getAuthInfo(workspaceId?: string): Promise<AuthInfo> {
+  const serverUrl = resolveServerUrl();
+  const envJwt = process.env.LOBEHUB_JWT;
+  if (envJwt) {
+    return {
+      accessToken: envJwt,
+      headers: withWorkspaceHeader(
+        {
+          'Content-Type': 'application/json',
+          'Oidc-Auth': envJwt,
+        },
+        workspaceId,
+      ),
+      serverUrl,
+    };
+  }
+
   const result = await getValidToken();
-  if (!result) {
-    log.error("No authentication found. Run 'lh login' first.");
+  if (result.status !== 'ok') {
+    if (readCliApiKeyEnv()) {
+      log.error(
+        `API key auth from ${CLI_API_KEY_ENV} is not supported for /webapi/* routes. Run OIDC login instead.`,
+      );
+      process.exit(1);
+    }
+
+    const report = describeTokenLookup(result);
+    log.error(
+      report
+        ? `${report.detail} ${report.fix}`
+        : `No authentication found. Run '${CLI_PRIMARY_BIN} login' first.`,
+    );
     process.exit(1);
   }
 
-  const accessToken = result!.credentials.accessToken;
-  const serverUrl = loadSettings()?.serverUrl || OFFICIAL_SERVER_URL;
+  const accessToken = result.credentials.accessToken;
 
   return {
     accessToken,
-    headers: {
-      'Content-Type': 'application/json',
-      'Oidc-Auth': accessToken,
-      'X-lobe-chat-auth': obfuscatePayloadWithXOR({}),
-    },
-    serverUrl: serverUrl.replace(/\/$/, ''),
+    headers: withWorkspaceHeader(
+      {
+        'Content-Type': 'application/json',
+        'Oidc-Auth': accessToken,
+      },
+      workspaceId,
+    ),
+    serverUrl,
+  };
+}
+
+export type AgentStreamTokenType = 'jwt' | 'apiKey';
+
+export interface AgentStreamAuthInfo {
+  headers: Record<string, string>;
+  serverUrl: string;
+  /**
+   * Raw token value (without header prefix). Used for WebSocket auth messages
+   * where header-based auth is not available.
+   */
+  token: string;
+  /**
+   * How the token should be verified by downstream services (agent gateway WS).
+   * jwt  → validate with JWKS
+   * apiKey → validate by calling /api/v1/users/me
+   */
+  tokenType: AgentStreamTokenType;
+}
+
+export async function getAgentStreamAuthInfo(workspaceId?: string): Promise<AgentStreamAuthInfo> {
+  const serverUrl = resolveServerUrl();
+
+  const envJwt = process.env.LOBEHUB_JWT;
+  if (envJwt) {
+    return {
+      headers: withWorkspaceHeader({ 'Oidc-Auth': envJwt }, workspaceId),
+      serverUrl,
+      token: envJwt,
+      tokenType: 'jwt',
+    };
+  }
+
+  const envApiKey = readCliApiKeyEnv();
+  if (envApiKey) {
+    return {
+      headers: withWorkspaceHeader({ 'X-API-Key': envApiKey }, workspaceId),
+      serverUrl,
+      token: envApiKey,
+      tokenType: 'apiKey',
+    };
+  }
+
+  const result = await getValidToken();
+  if (result.status !== 'ok') {
+    const report = describeTokenLookup(result);
+    log.error(
+      report
+        ? `${report.detail} ${report.fix}`
+        : `No authentication found. Run '${CLI_PRIMARY_BIN} login' first, or set ${CLI_API_KEY_ENV}.`,
+    );
+    process.exit(1);
+
+    return {
+      headers: {},
+      serverUrl,
+      token: '',
+      tokenType: 'jwt',
+    };
+  }
+
+  return {
+    headers: withWorkspaceHeader({ 'Oidc-Auth': result.credentials.accessToken }, workspaceId),
+    serverUrl,
+    token: result.credentials.accessToken,
+    tokenType: 'jwt',
   };
 }

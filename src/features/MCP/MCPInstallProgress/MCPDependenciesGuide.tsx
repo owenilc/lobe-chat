@@ -1,8 +1,8 @@
-import { Button, Flexbox, Markdown, Snippet, Text } from '@lobehub/ui';
-import { Card, Space } from 'antd';
+import { Block, Flexbox, Markdown, Snippet } from '@lobehub/ui';
+import { Button, Text } from '@lobehub/ui/base-ui';
 import { createStaticStyles, cssVar } from 'antd-style';
 import { AlertTriangle, CheckCircle, ExternalLink, Terminal } from 'lucide-react';
-import * as motion from 'motion/react-m';
+import * as m from 'motion/react-m';
 import { memo } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -92,13 +92,13 @@ const MCPDependenciesGuide = memo<MCPDependenciesGuideProps>(
     };
 
     return (
-      <motion.div
+      <m.div
         animate={{ y: 0 }}
         className={styles.container}
         initial={{ y: 8 }}
         transition={{ delay: 0.1, duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
       >
-        <motion.div
+        <m.div
           animate={{ opacity: 1, y: 0 }}
           initial={{ opacity: 0, y: 4 }}
           style={{ marginBottom: 8 }}
@@ -115,16 +115,21 @@ const MCPDependenciesGuide = memo<MCPDependenciesGuideProps>(
               {t('mcpInstall.dependenciesDescription')}
             </Text>
           </Flexbox>
-        </motion.div>
+        </m.div>
 
-        <motion.div
+        <m.div
           animate={{ opacity: 1, y: 0 }}
           initial={{ opacity: 0, y: 4 }}
           transition={{ delay: 0.2, duration: 0.2 }}
         >
           <Flexbox gap={8}>
             {systemDependencies.map((dep) => (
-              <Card className={styles.dependencyCard} key={dep.name} size="small">
+              <Block
+                className={styles.dependencyCard}
+                key={dep.name}
+                padding={12}
+                variant={'outlined'}
+              >
                 <Flexbox gap={12}>
                   <Flexbox horizontal align="center" justify="space-between">
                     <Flexbox horizontal align="center" gap={8}>
@@ -182,12 +187,12 @@ const MCPDependenciesGuide = memo<MCPDependenciesGuideProps>(
                     </Flexbox>
                   )}
                 </Flexbox>
-              </Card>
+              </Block>
             ))}
           </Flexbox>
-        </motion.div>
+        </m.div>
 
-        <motion.div
+        <m.div
           animate={{ opacity: 1, y: 0 }}
           className={styles.footer}
           initial={{ opacity: 0, y: 4 }}
@@ -197,17 +202,17 @@ const MCPDependenciesGuide = memo<MCPDependenciesGuideProps>(
             <Button size="small" onClick={handleCancel}>
               {t('common:cancel')}
             </Button>
-            <Space>
+            <Flexbox horizontal align={'center'} gap={8}>
               <Button size="small" onClick={handleSkipCheck}>
                 {t('mcpInstall.skipDependencies')}
               </Button>
               <Button size="small" type="primary" onClick={handleRetryCheck}>
                 {t('mcpInstall.recheckDependencies')}
               </Button>
-            </Space>
+            </Flexbox>
           </Flexbox>
-        </motion.div>
-      </motion.div>
+        </m.div>
+      </m.div>
     );
   },
 );

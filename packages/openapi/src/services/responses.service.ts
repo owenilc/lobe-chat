@@ -1,5 +1,6 @@
 import type { AgentState } from '@lobechat/agent-runtime';
 
+import { createStreamEventManager } from '@/server/modules/AgentRuntime/factory';
 import { InMemoryStreamEventManager } from '@/server/modules/AgentRuntime/InMemoryStreamEventManager';
 import type {
   StreamChunkData,
@@ -11,11 +12,13 @@ import { AiAgentService } from '@/server/services/aiAgent';
 import { BaseService } from '../common/base.service';
 import type {
   CreateResponseRequest,
+  FunctionCallOutputItem,
   InputItem,
   OutputItem,
   ResponseObject,
   ResponseStreamEvent,
   ResponseUsage,
+  Tool,
 } from '../types/responses.type';
 
 /**
@@ -27,6 +30,57 @@ import type {
  * with executeSync used when synchronous results are needed.
  */
 export class ResponsesService extends BaseService {
+  /**
+   * Extract hosted builtin tool identifiers from tools array
+   */
+  private extractHostedToolIds(tools?: Tool[] | null): string[] {
+    if (!tools) return [];
+    return tools.filter((t) => t.type !== 'function').map((t) => t.type);
+  }
+
+  /**
+   * Extract function tool definitions from tools array
+   */
+  private extractFunctionTools(
+    tools?: Tool[] | null,
+  ): Array<{ description?: string; name: string; parameters?: Record<string, any> }> {
+    if (!tools) return [];
+    return tools
+      .filter((t): t is Tool & { type: 'function' } => t.type === 'function')
+      .map((t) => ({
+        description: (t as any).description,
+        name: (t as any).name,
+        parameters: (t as any).parameters,
+      }));
+  }
+
+  /**
+   * Check if input contains function_call_output items (resume flow)
+   */
+  private hasFunctionCallOutputs(input: string | InputItem[]): boolean {
+    if (typeof input === 'string') return false;
+    return input.some((item) => item.type === 'function_call_output');
+  }
+
+  /**
+   * Extract function_call_output items from input
+   */
+  private extractFunctionCallOutputs(input: string | InputItem[]): FunctionCallOutputItem[] {
+    if (typeof input === 'string') return [];
+    return input.filter(
+      (item): item is FunctionCallOutputItem => item.type === 'function_call_output',
+    );
+  }
+
+  /**
+   * Build a prompt from function_call_output items for the resume flow.
+   * Encodes tool results so the LLM can continue the conversation.
+   */
+  private buildToolResultPrompt(outputs: FunctionCallOutputItem[]): string {
+    const parts = outputs.map((o) => `Tool call ${o.call_id} returned: ${o.output}`);
+    return parts.join('\n');
+  }
+
   /**
    * Extract a prompt string from OpenResponses input
    */
@@ -127,40 +181,40 @@ export class ResponsesService extends BaseService {
       if (msg.role === 'assistant') {
         const hasToolCalls = msg.tool_calls && msg.tool_calls.length > 0;
 
+        // Emit message item for assistant text content (even when tool_calls are present)
+        const content = typeof msg.content === 'string' ? msg.content : '';
+        if (content) {
+          outputText = content;
+          output.push({
+            content: [
+              { annotations: [], logprobs: [], text: content, type: 'output_text' as const },
+            ],
+            id: `msg_${responseId}_${itemCounter++}`,
+            role: 'assistant' as const,
+            status: 'completed' as const,
+            type: 'message' as const,
+          });
+        }
+
         // Handle tool_calls from assistant
         if (hasToolCalls) {
           for (const toolCall of msg.tool_calls) {
+            // Decode internal tool name format back to display name
+            const fnName = this.decodeToolName(toolCall.function?.name ?? '');
             output.push({
               arguments: toolCall.function?.arguments ?? '{}',
               call_id: toolCall.id ?? `call_${itemCounter}`,
-              id: `fc_${responseId.slice(5)}_${itemCounter++}`,
-              name: toolCall.function?.name ?? '',
+              id: `fc_${responseId}_${itemCounter++}`,
+              name: fnName,
               status: 'completed' as const,
               type: 'function_call' as const,
-            });
-          }
-        }
-
-        // Only emit message item for assistant messages WITHOUT tool_calls (i.e., final text response)
-        if (!hasToolCalls) {
-          const content = typeof msg.content === 'string' ? msg.content : '';
-          if (content) {
-            outputText = content;
-            output.push({
-              content: [
-                { annotations: [], logprobs: [], text: content, type: 'output_text' as const },
-              ],
-              id: `msg_${responseId.slice(5)}_${itemCounter++}`,
-              role: 'assistant' as const,
-              status: 'completed' as const,
-              type: 'message' as const,
             });
           }
         }
       } else if (msg.role === 'tool') {
         output.push({
           call_id: msg.tool_call_id ?? '',
-          id: `fco_${responseId.slice(5)}_${itemCounter++}`,
+          id: `fco_${responseId}_${itemCounter++}`,
           output: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content),
           status: 'completed' as const,
           type: 'function_call_output' as const,
@@ -169,6 +223,25 @@ export class ResponsesService extends BaseService {
     }
 
     return { output, outputText };
+  }
+
+  /**
+   * Decode internal tool name format to display name.
+   * - lobe-client-fn____get_weather → get_weather
+   * - lobe-cloud-sandbox____executeCode → lobe-cloud-sandbox/executeCode
+   * - my-plugin____myApi____mcp → my-plugin/myApi (legacy 3-segment still tolerated)
+   */
+  private decodeToolName(rawName: string): string {
+    const SEPARATOR = '____';
+    if (rawName.startsWith(`lobe-client-fn${SEPARATOR}`)) {
+      return rawName.slice(`lobe-client-fn${SEPARATOR}`.length);
+    }
+    const parts = rawName.split(SEPARATOR);
+    if (parts.length >= 2) {
+      // parts[0] = identifier, parts[1] = apiName, parts[2+] = type (ignored for display)
+      return `${parts[0]}/${parts[1]}`;
+    }
+    return rawName;
   }
 
   /**
@@ -192,7 +265,6 @@ export class ResponsesService extends BaseService {
 
     try {
       const model = params.model;
-      const prompt = this.extractPrompt(params.input);
       const instructions = this.buildInstructions(params);
 
       // Resolve topicId from previous_response_id for multi-turn
@@ -200,8 +272,17 @@ export class ResponsesService extends BaseService {
         ? this.extractTopicIdFromResponseId(params.previous_response_id)
         : null;
 
+      // Check for function_call_output resume flow
+      const functionCallOutputs = this.extractFunctionCallOutputs(params.input);
+      const isResumeFlow = functionCallOutputs.length > 0 && previousTopicId;
+
+      const prompt = isResumeFlow
+        ? this.buildToolResultPrompt(functionCallOutputs)
+        : this.extractPrompt(params.input);
+
       this.log('info', 'Creating response via execAgent', {
         hasInstructions: !!instructions,
+        isResumeFlow,
         model,
         previousTopicId,
         prompt: prompt.slice(0, 50),
@@ -209,14 +290,21 @@ export class ResponsesService extends BaseService {
 
       // 1. Create agent operation without auto-start
       // model field is used as agentId
-      const aiAgentService = new AiAgentService(this.db, this.userId);
+      const additionalPluginIds = this.extractHostedToolIds(params.tools);
+      const functionTools = this.extractFunctionTools(params.tools);
+      const aiAgentService = new AiAgentService(this.db, this.userId, {
+        workspaceId: this.workspaceId,
+      });
       const execResult = await aiAgentService.execAgent({
+        additionalPluginIds: additionalPluginIds.length > 0 ? additionalPluginIds : undefined,
         agentId: model,
         appContext: previousTopicId ? { topicId: previousTopicId } : undefined,
         autoStart: false,
+        functionTools: functionTools.length > 0 ? functionTools : undefined,
         instructions,
         prompt,
         stream: false,
+        trigger: 'openapi',
       });
 
       if (!execResult.success) {
@@ -229,6 +317,7 @@ export class ResponsesService extends BaseService {
       // 2. Execute synchronously to completion
       const agentRuntimeService = new AgentRuntimeService(this.db, this.userId, {
         queueService: null,
+        workspaceId: this.workspaceId,
       });
       const finalState = await agentRuntimeService.executeSync(execResult.operationId);
 
@@ -236,14 +325,23 @@ export class ResponsesService extends BaseService {
       const { output, outputText } = this.extractOutputItems(finalState, responseId);
       const usage = this.extractUsage(finalState);
 
+      const isClientToolInterrupt =
+        finalState.status === 'waiting_for_async_tool' &&
+        finalState.interruption?.reason === 'client_tool_execution';
+
       return this.buildResponseObject({
-        completedAt: Math.floor(Date.now() / 1000),
+        completedAt: isClientToolInterrupt ? null : Math.floor(Date.now() / 1000),
         createdAt,
         id: responseId,
+        incompleteDetails: isClientToolInterrupt ? { reason: 'client_tool_execution' } : undefined,
         output,
         outputText,
         params,
-        status: finalState.status === 'error' ? 'failed' : 'completed',
+        status: isClientToolInterrupt
+          ? 'incomplete'
+          : finalState.status === 'error'
+            ? 'failed'
+            : 'completed',
         usage,
       });
     } catch (error) {
@@ -274,12 +372,12 @@ export class ResponsesService extends BaseService {
   ): AsyncGenerator<ResponseStreamEvent> {
     const createdAt = Math.floor(Date.now() / 1000);
     let sequenceNumber = 0;
-    const outputIndex = 0;
-    const contentIndex = 0;
+    // Set once the run has a subscription to release; the `finally` below runs
+    // even when the consumer closes this generator early (client disconnect).
+    let releaseStream: (() => Promise<void>) | undefined;
 
     try {
       const model = params.model;
-      const prompt = this.extractPrompt(params.input);
       const instructions = this.buildInstructions(params);
 
       // Resolve topicId from previous_response_id for multi-turn
@@ -287,16 +385,31 @@ export class ResponsesService extends BaseService {
         ? this.extractTopicIdFromResponseId(params.previous_response_id)
         : null;
 
+      // Check for function_call_output resume flow
+      const functionCallOutputs = this.extractFunctionCallOutputs(params.input);
+      const isResumeFlow = functionCallOutputs.length > 0 && previousTopicId;
+
+      const prompt = isResumeFlow
+        ? this.buildToolResultPrompt(functionCallOutputs)
+        : this.extractPrompt(params.input);
+
       // 1. Create agent operation (before generating responseId so we have topicId)
       // model field is used as agentId
-      const aiAgentService = new AiAgentService(this.db, this.userId);
+      const additionalPluginIds = this.extractHostedToolIds(params.tools);
+      const functionTools = this.extractFunctionTools(params.tools);
+      const aiAgentService = new AiAgentService(this.db, this.userId, {
+        workspaceId: this.workspaceId,
+      });
       const execResult = await aiAgentService.execAgent({
+        additionalPluginIds: additionalPluginIds.length > 0 ? additionalPluginIds : undefined,
         agentId: model,
         appContext: previousTopicId ? { topicId: previousTopicId } : undefined,
         autoStart: false,
+        functionTools: functionTools.length > 0 ? functionTools : undefined,
         instructions,
         prompt,
         stream: true,
+        trigger: 'openapi',
       });
 
       if (!execResult.success) {
@@ -307,7 +420,6 @@ export class ResponsesService extends BaseService {
 
       // Generate response ID encoding topicId for multi-turn support
       const responseId = this.generateResponseId(execResult.topicId);
-      const outputItemId = `msg_${responseId.slice(5)}`;
 
       const response = this.buildResponseObject({
         createdAt,
@@ -326,11 +438,38 @@ export class ResponsesService extends BaseService {
         type: 'response.in_progress' as const,
       };
 
-      // 2. Create AgentRuntimeService with custom stream manager for event subscription
-      const streamEventManager = new InMemoryStreamEventManager();
+      // 2. Run the operation on the gateway-aware stream pipeline, with this
+      // generator's own subscription on a private in-memory manager.
+      //
+      // `execAgent` above already registered this operation with the
+      // agent-gateway Durable Object (`publishAgentRuntimeInit`), and that DO
+      // only closes the session on an `agent_runtime_end`. Executing on a
+      // manager nothing mirrors leaves the DO holding a run that finished long
+      // ago as `running`, so its inactivity watchdog abandons the operation
+      // ~10 minutes later — writing an `Operation abandoned: inactivity_watchdog`
+      // failure on top of a turn that already succeeded, and handing the API
+      // caller an error after the response it already received. Going through
+      // `createStreamEventManager` puts every event, terminal included, on the
+      // gateway.
+      //
+      // The events this generator consumes stay push-style from the process that
+      // produces them: the subscription hangs off a private in-memory manager
+      // rather than taking a second Redis subscriber's connection per streamed
+      // request.
+      //
+      // `deferPushes` matches `AgentRuntimeService`'s own default: without it a
+      // `stream_end` / `message_patch` step would block on its gateway HTTP push
+      // (up to 5s whenever the gateway is slow). The `finally` below drains what
+      // this invocation deferred, which is what the option requires.
+      const localStreamManager = new InMemoryStreamEventManager();
+      const streamEventManager = createStreamEventManager({
+        deferPushes: true,
+        inner: localStreamManager,
+      });
       const agentRuntimeService = new AgentRuntimeService(this.db, this.userId, {
         queueService: null,
         streamEventManager,
+        workspaceId: this.workspaceId,
       });
 
       // 3. Setup async event queue to bridge push events → pull-based generator
@@ -338,13 +477,24 @@ export class ResponsesService extends BaseService {
       let resolveWaiting: (() => void) | null = null;
       let executionDone = false;
 
-      const unsubscribe = streamEventManager.subscribe(operationId, (events) => {
+      const unsubscribe = localStreamManager.subscribe(operationId, (events) => {
         eventQueue.push(...events);
         if (resolveWaiting) {
           resolveWaiting();
           resolveWaiting = null;
         }
       });
+
+      // Released in the `finally` below, which also covers this generator being
+      // closed early when the API client disconnects mid-stream.
+      releaseStream = async () => {
+        unsubscribe();
+        // Make sure the gateway pushes this invocation issued — including the
+        // terminal event that closes the DO session — land before the function
+        // can be frozen. Nothing else guarantees an unawaited push survives the
+        // end of the request.
+        await streamEventManager.drainPushes?.(operationId);
+      };
 
       // Helper to wait for next event batch
       const waitForEvents = (): Promise<void> =>
@@ -375,32 +525,113 @@ export class ResponsesService extends BaseService {
           }
         });
 
-      // 5. Emit output_item.added + content_part.added immediately
-      const outputItem: OutputItem = {
-        content: [{ annotations: [], logprobs: [], text: '', type: 'output_text' as const }],
-        id: outputItemId,
-        role: 'assistant' as const,
-        status: 'in_progress' as const,
-        type: 'message' as const,
-      };
-
-      yield {
-        item: outputItem,
-        output_index: outputIndex,
-        sequence_number: sequenceNumber++,
-        type: 'response.output_item.added' as const,
-      };
-      yield {
-        content_index: contentIndex,
-        item_id: outputItemId,
-        output_index: outputIndex,
-        part: { annotations: [], logprobs: [], text: '', type: 'output_text' as const },
-        sequence_number: sequenceNumber++,
-        type: 'response.content_part.added' as const,
-      };
-
-      // 6. Process stream events and emit text deltas
+      // 5. Process stream events and emit output items
       let accumulatedText = '';
+      let currentOutputIndex = 0;
+      let itemCounter = 0;
+      let textMessageStarted = false;
+
+      // Track active (in-progress) tool calls for proper incremental streaming
+      const activeToolCalls = new Map<
+        string,
+        { fcItemId: string; name: string; outputIndex: number; prevArguments: string }
+      >();
+      let currentTextItemId = '';
+
+      const startTextMessage = function* (seq: { n: number }) {
+        if (textMessageStarted) return;
+        textMessageStarted = true;
+        currentTextItemId = `msg_${responseId}_${itemCounter++}`;
+        const item: OutputItem = {
+          content: [{ annotations: [], logprobs: [], text: '', type: 'output_text' as const }],
+          id: currentTextItemId,
+          role: 'assistant' as const,
+          status: 'in_progress' as const,
+          type: 'message' as const,
+        };
+        yield {
+          item,
+          output_index: currentOutputIndex,
+          sequence_number: seq.n++,
+          type: 'response.output_item.added' as const,
+        };
+        yield {
+          content_index: 0,
+          item_id: currentTextItemId,
+          output_index: currentOutputIndex,
+          part: { annotations: [], logprobs: [], text: '', type: 'output_text' as const },
+          sequence_number: seq.n++,
+          type: 'response.content_part.added' as const,
+        };
+      };
+
+      const finishTextMessage = function* (seq: { n: number }, text: string) {
+        if (!textMessageStarted) return;
+        textMessageStarted = false;
+
+        yield {
+          content_index: 0,
+          item_id: currentTextItemId,
+          logprobs: [],
+          output_index: currentOutputIndex,
+          sequence_number: seq.n++,
+          text,
+          type: 'response.output_text.done' as const,
+        };
+        yield {
+          content_index: 0,
+          item_id: currentTextItemId,
+          output_index: currentOutputIndex,
+          part: { annotations: [], logprobs: [], text, type: 'output_text' as const },
+          sequence_number: seq.n++,
+          type: 'response.content_part.done' as const,
+        };
+        yield {
+          item: {
+            content: [{ annotations: [], logprobs: [], text, type: 'output_text' as const }],
+            id: currentTextItemId,
+            role: 'assistant' as const,
+            status: 'completed' as const,
+            type: 'message' as const,
+          } as OutputItem,
+          output_index: currentOutputIndex,
+          sequence_number: seq.n++,
+          type: 'response.output_item.done' as const,
+        };
+        currentOutputIndex++;
+      };
+
+      const finishActiveToolCalls = function* (seq: { n: number }) {
+        for (const [callId, tc] of activeToolCalls) {
+          yield {
+            arguments: tc.prevArguments || '{}',
+            item_id: tc.fcItemId,
+            output_index: tc.outputIndex,
+            sequence_number: seq.n++,
+            type: 'response.function_call_arguments.done' as const,
+          };
+          yield {
+            item: {
+              arguments: tc.prevArguments || '{}',
+              call_id: callId,
+              id: tc.fcItemId,
+              name: tc.name,
+              status: 'completed' as const,
+              type: 'function_call' as const,
+            } as OutputItem,
+            output_index: tc.outputIndex,
+            sequence_number: seq.n++,
+            type: 'response.output_item.done' as const,
+          };
+        }
+        if (activeToolCalls.size > 0) {
+          currentOutputIndex += activeToolCalls.size;
+          activeToolCalls.clear();
+        }
+      };
+
+      // Shared mutable sequence counter for generators
+      const seq = { n: sequenceNumber };
 
       while (!executionDone || eventQueue.length > 0) {
         await waitForEvents();
@@ -410,25 +641,147 @@ export class ResponsesService extends BaseService {
 
           if (event.type === 'stream_chunk') {
             const chunk = event.data as StreamChunkData;
+
             if (chunk.chunkType === 'text' && chunk.content) {
+              // Start text message output item if not already started
+              yield* startTextMessage(seq);
+
               accumulatedText += chunk.content;
               yield {
-                content_index: contentIndex,
+                content_index: 0,
                 delta: chunk.content,
-                item_id: outputItemId,
+                item_id: currentTextItemId,
                 logprobs: [],
-                output_index: outputIndex,
-                sequence_number: sequenceNumber++,
+                output_index: currentOutputIndex,
+                sequence_number: seq.n++,
                 type: 'response.output_text.delta' as const,
               };
+            } else if (chunk.chunkType === 'tools_calling' && chunk.toolsCalling) {
+              // Close any open text message before emitting tool calls
+              yield* finishTextMessage(seq, accumulatedText);
+              accumulatedText = '';
+
+              // Stream tool call deltas incrementally within stable output items
+              for (const toolCall of chunk.toolsCalling) {
+                const callId = toolCall.id;
+                const existing = activeToolCalls.get(callId);
+
+                if (!existing) {
+                  // First time seeing this tool call — emit output_item.added
+                  const fcItemId = `fc_${responseId}_${itemCounter++}`;
+                  const isClientTool = toolCall.identifier === 'lobe-client-fn';
+                  const toolDisplayName = isClientTool
+                    ? toolCall.apiName
+                    : `${toolCall.identifier}/${toolCall.apiName}`;
+                  const outputIndex = currentOutputIndex + activeToolCalls.size;
+
+                  activeToolCalls.set(callId, {
+                    fcItemId,
+                    name: toolDisplayName,
+                    outputIndex,
+                    prevArguments: '',
+                  });
+
+                  yield {
+                    item: {
+                      arguments: '',
+                      call_id: callId,
+                      id: fcItemId,
+                      name: toolDisplayName,
+                      status: 'in_progress' as const,
+                      type: 'function_call' as const,
+                    } as OutputItem,
+                    output_index: outputIndex,
+                    sequence_number: seq.n++,
+                    type: 'response.output_item.added' as const,
+                  };
+
+                  // Emit initial delta if arguments already present
+                  if (toolCall.arguments) {
+                    activeToolCalls.get(callId)!.prevArguments = toolCall.arguments;
+                    yield {
+                      delta: toolCall.arguments,
+                      item_id: fcItemId,
+                      output_index: outputIndex,
+                      sequence_number: seq.n++,
+                      type: 'response.function_call_arguments.delta' as const,
+                    };
+                  }
+                } else {
+                  // Subsequent chunk — compute incremental delta
+                  const currentArgs = toolCall.arguments ?? '';
+                  const delta = currentArgs.slice(existing.prevArguments.length);
+
+                  if (delta) {
+                    existing.prevArguments = currentArgs;
+                    yield {
+                      delta,
+                      item_id: existing.fcItemId,
+                      output_index: existing.outputIndex,
+                      sequence_number: seq.n++,
+                      type: 'response.function_call_arguments.delta' as const,
+                    };
+                  }
+                }
+              }
+            } else if (chunk.chunkType === 'reasoning' && chunk.reasoning) {
+              // Emit reasoning as text delta (within a text message)
+              yield* startTextMessage(seq);
             }
+          } else if (event.type === 'tool_end') {
+            // Finalize any remaining active tool calls before emitting tool output
+            yield* finishActiveToolCalls(seq);
+
+            // Emit function_call_output for completed tool execution
+            const toolData = event.data as {
+              isSuccess: boolean;
+              payload: { toolCalling: { id: string } };
+              result: { content: string };
+            };
+            const fcoItemId = `fco_${responseId}_${itemCounter++}`;
+
+            yield {
+              item: {
+                call_id: toolData.payload.toolCalling.id,
+                id: fcoItemId,
+                output: toolData.result?.content ?? '',
+                status: 'completed' as const,
+                type: 'function_call_output' as const,
+              } as OutputItem,
+              output_index: currentOutputIndex,
+              sequence_number: seq.n++,
+              type: 'response.output_item.added' as const,
+            };
+            yield {
+              item: {
+                call_id: toolData.payload.toolCalling.id,
+                id: fcoItemId,
+                output: toolData.result?.content ?? '',
+                status: 'completed' as const,
+                type: 'function_call_output' as const,
+              } as OutputItem,
+              output_index: currentOutputIndex,
+              sequence_number: seq.n++,
+              type: 'response.output_item.done' as const,
+            };
+            currentOutputIndex++;
+          } else if (event.type === 'stream_retry') {
+            // LLM retry — discard stale tool call state from the failed attempt
+            // so we don't emit phantom function_calls on final flush
+            activeToolCalls.clear();
           }
         }
       }
 
-      // 7. Wait for execution to fully complete
+      // Finalize any in-progress tool calls
+      yield* finishActiveToolCalls(seq);
+
+      // Close any remaining open text message
+      yield* finishTextMessage(seq, accumulatedText);
+      sequenceNumber = seq.n;
+
+      // 6. Wait for execution to fully complete
       await executionPromise;
-      unsubscribe();
 
       // If no text came through streaming, extract from final state
       if (!accumulatedText && finalState) {
@@ -439,71 +792,56 @@ export class ResponsesService extends BaseService {
         ? this.extractUsage(finalState)
         : { input_tokens: 0, output_tokens: 0, total_tokens: 0 };
 
-      // 8. Emit closing events for text content
-      yield {
-        content_index: contentIndex,
-        item_id: outputItemId,
-        logprobs: [],
-        output_index: outputIndex,
-        sequence_number: sequenceNumber++,
-        text: accumulatedText,
-        type: 'response.output_text.done' as const,
-      };
-
-      yield {
-        content_index: contentIndex,
-        item_id: outputItemId,
-        output_index: outputIndex,
-        part: {
-          annotations: [],
-          logprobs: [],
-          text: accumulatedText,
-          type: 'output_text' as const,
-        },
-        sequence_number: sequenceNumber++,
-        type: 'response.content_part.done' as const,
-      };
-
-      const completedItem: OutputItem = {
-        content: [
-          { annotations: [], logprobs: [], text: accumulatedText, type: 'output_text' as const },
-        ],
-        id: outputItemId,
-        role: 'assistant' as const,
-        status: 'completed' as const,
-        type: 'message' as const,
-      };
-
-      yield {
-        item: completedItem,
-        output_index: outputIndex,
-        sequence_number: sequenceNumber++,
-        type: 'response.output_item.done' as const,
-      };
-
-      // 9. Build final output including tool calls from AgentState
+      // 7. Build final output including tool calls from AgentState
       const fullOutput = finalState
         ? this.extractOutputItems(finalState, responseId)
-        : { output: [completedItem], outputText: accumulatedText };
+        : { output: [], outputText: accumulatedText };
 
-      yield {
-        response: {
-          ...response,
-          completed_at: Math.floor(Date.now() / 1000),
-          output: fullOutput.output,
-          output_text: fullOutput.outputText || accumulatedText,
-          status: (finalState?.status === 'error' ? 'failed' : 'completed') as any,
-          usage: {
-            input_tokens: usage.input_tokens,
-            input_tokens_details: { cached_tokens: 0 },
-            output_tokens: usage.output_tokens,
-            output_tokens_details: { reasoning_tokens: 0 },
-            total_tokens: usage.total_tokens,
+      // Determine if agent was interrupted for client tool execution
+      const isClientToolInterrupt =
+        finalState?.status === 'waiting_for_async_tool' &&
+        finalState?.interruption?.reason === 'client_tool_execution';
+
+      if (isClientToolInterrupt) {
+        yield {
+          response: {
+            ...response,
+            completed_at: null,
+            incomplete_details: { reason: 'client_tool_execution' },
+            output: fullOutput.output,
+            output_text: fullOutput.outputText || accumulatedText,
+            status: 'incomplete' as any,
+            usage: {
+              input_tokens: usage.input_tokens,
+              input_tokens_details: { cached_tokens: 0 },
+              output_tokens: usage.output_tokens,
+              output_tokens_details: { reasoning_tokens: 0 },
+              total_tokens: usage.total_tokens,
+            },
           },
-        },
-        sequence_number: sequenceNumber,
-        type: 'response.completed' as const,
-      };
+          sequence_number: sequenceNumber,
+          type: 'response.incomplete' as const,
+        };
+      } else {
+        yield {
+          response: {
+            ...response,
+            completed_at: Math.floor(Date.now() / 1000),
+            output: fullOutput.output,
+            output_text: fullOutput.outputText || accumulatedText,
+            status: (finalState?.status === 'error' ? 'failed' : 'completed') as any,
+            usage: {
+              input_tokens: usage.input_tokens,
+              input_tokens_details: { cached_tokens: 0 },
+              output_tokens: usage.output_tokens,
+              output_tokens_details: { reasoning_tokens: 0 },
+              total_tokens: usage.total_tokens,
+            },
+          },
+          sequence_number: sequenceNumber,
+          type: 'response.completed' as const,
+        };
+      }
     } catch (error) {
       const errorResponseId = this.generateResponseId();
       this.log('error', 'Streaming response failed', { error, responseId: errorResponseId });
@@ -526,42 +864,36 @@ export class ResponsesService extends BaseService {
         sequence_number: sequenceNumber,
         type: 'response.failed' as const,
       };
+    } finally {
+      // Runs on the normal path and when the consumer closes this generator
+      // early, so a client that disconnects mid-stream still releases the
+      // subscription and flushes the gateway pushes it triggered.
+      await releaseStream?.();
     }
   }
 
   /**
-   * Generate a response ID that encodes the topicId for multi-turn support.
-   * Format: resp_{topicId}_{8-char-random-suffix}
-   * When no topicId is available, generates a plain random ID.
+   * Generate a response ID.
+   * Uses topicId directly as the response ID for multi-turn support.
+   * When no topicId is available, generates a random ID.
    */
   private generateResponseId(topicId?: string): string {
+    if (topicId) return topicId;
+
     const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-    let suffix = '';
-    for (let i = 0; i < 8; i++) {
-      suffix += chars[Math.floor(Math.random() * chars.length)];
-    }
-    if (topicId) {
-      return `resp_${topicId}_${suffix}`;
-    }
-    // Fallback: plain 24-char random ID
     let id = '';
-    for (let i = 0; i < 16; i++) {
+    for (let i = 0; i < 24; i++) {
       id += chars[Math.floor(Math.random() * chars.length)];
     }
-    return `resp_${id}_${suffix}`;
+    return id;
   }
 
   /**
    * Extract topicId from a response ID (previous_response_id).
-   * Reverses the encoding from generateResponseId.
+   * Since response ID is the topicId itself, just return it directly.
    */
   private extractTopicIdFromResponseId(responseId: string): string | null {
-    if (!responseId.startsWith('resp_')) return null;
-    const withoutPrefix = responseId.slice(5); // remove "resp_"
-    const lastUnderscore = withoutPrefix.lastIndexOf('_');
-    if (lastUnderscore === -1) return null;
-    const topicId = withoutPrefix.slice(0, lastUnderscore);
-    return topicId || null;
+    return responseId || null;
   }
 
   private buildResponseObject(opts: {
@@ -569,6 +901,7 @@ export class ResponsesService extends BaseService {
     createdAt: number;
     error?: { code: 'server_error'; message: string };
     id: string;
+    incompleteDetails?: { reason: string };
     output: OutputItem[];
     outputText: string;
     params: CreateResponseRequest;
@@ -583,7 +916,7 @@ export class ResponsesService extends BaseService {
       error: opts.error ?? null,
       frequency_penalty: p.frequency_penalty ?? 0,
       id: opts.id,
-      incomplete_details: null,
+      incomplete_details: opts.incompleteDetails ?? null,
       instructions: opts.params.instructions ?? null,
       max_output_tokens: opts.params.max_output_tokens ?? null,
       max_tool_calls: p.max_tool_calls ?? null,

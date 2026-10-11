@@ -1,13 +1,14 @@
 import { z } from 'zod';
 
-import type { RoleItem, UserItem, UserRoleItem } from '@/database/schemas';
+import type { UserRoleItem } from '@/database/schemas';
 
+import type { PublicRole, PublicUser } from '../helpers/public-fields';
 import type { IPaginationQuery, PaginationQueryResponse } from './common.type';
 
 // ==================== User Base Types ====================
 
 /**
- * 获取用户列表请求参数（可选分页）
+ * Get user list request parameters (optional pagination)
  */
 export interface GetUsersRequest {
   page?: number;
@@ -15,17 +16,17 @@ export interface GetUsersRequest {
 }
 
 /**
- * 扩展的用户信息类型，包含角色信息
+ * Extended user info type including role information
  */
-export type UserWithRoles = UserItem & {
+export type UserWithRoles = PublicUser & {
   messageCount?: number;
-  roles?: RoleItem[];
+  roles?: PublicRole[];
 };
 
 // ==================== User CRUD Types ====================
 
 /**
- * 创建用户请求参数
+ * Create user request parameters
  */
 export interface CreateUserRequest {
   avatar?: string;
@@ -41,18 +42,18 @@ export interface CreateUserRequest {
 
 export const CreateUserRequestSchema = z.object({
   avatar: z.string().nullish(),
-  email: z.string().email('邮箱格式不正确').nullish(),
+  email: z.string().email('Invalid email format').nullish(),
   firstName: z.string().nullish(),
   fullName: z.string().nullish(),
   id: z.string().nullish(),
   lastName: z.string().nullish(),
   phone: z.string().nullish(),
-  roleIds: z.array(z.string().min(1, '角色ID不能为空')).nullish(),
-  username: z.string().min(1, '用户名不能为空').nullish(),
+  roleIds: z.array(z.string().min(1, 'Role ID cannot be empty')).nullish(),
+  username: z.string().min(1, 'Username cannot be empty').nullish(),
 });
 
 /**
- * 更新用户请求参数
+ * Update user request parameters
  */
 export interface UpdateUserRequest {
   avatar?: string;
@@ -68,19 +69,19 @@ export interface UpdateUserRequest {
 }
 
 /**
- * 更新用户请求验证Schema
+ * Update user request validation schema
  */
 export const UpdateUserRequestSchema = z.object({
   avatar: z.string().nullish(),
-  email: z.string().email('邮箱格式不正确').nullish(),
+  email: z.string().email('Invalid email format').nullish(),
   firstName: z.string().nullish(),
   fullName: z.string().nullish(),
   isOnboarded: z.boolean().nullish(),
   lastName: z.string().nullish(),
   phone: z.string().nullish(),
   preference: z.any().nullish(),
-  roleIds: z.array(z.string().min(1, '角色ID不能为空')).nullish(),
-  username: z.string().min(1, '用户名不能为空').nullish(),
+  roleIds: z.array(z.string().min(1, 'Role ID cannot be empty')).nullish(),
+  username: z.string().min(1, 'Username cannot be empty').nullish(),
 });
 
 // ==================== User Search Types ====================
@@ -96,46 +97,46 @@ export type UserListResponse = PaginationQueryResponse<{
 // ==================== User Role Management Types ====================
 
 /**
- * 单个添加角色的请求
+ * Request for adding a single role
  */
 export interface AddRoleRequest {
-  expiresAt?: string; // ISO 8601 格式的过期时间
+  expiresAt?: string; // Expiry time in ISO 8601 format
   roleId: string;
 }
 
 export const AddRoleRequestSchema = z.object({
-  expiresAt: z.string().datetime('过期时间必须是有效的ISO 8601格式').nullish(),
-  roleId: z.string().min(1, '角色ID不能为空'),
+  expiresAt: z.string().datetime('Expiry time must be a valid ISO 8601 format').nullish(),
+  roleId: z.string().min(1, 'Role ID cannot be empty'),
 });
 
 /**
- * 更新用户角色的请求参数
+ * Update user roles request parameters
  */
 export interface UpdateUserRolesRequest {
-  addRoles?: AddRoleRequest[]; // 要添加的角色
-  removeRoles?: string[]; // 要移除的角色ID
+  addRoles?: AddRoleRequest[]; // Roles to add
+  removeRoles?: string[]; // Role IDs to remove
 }
 
 export const UpdateUserRolesRequestSchema = z
   .object({
     addRoles: z.array(AddRoleRequestSchema).nullish(),
-    removeRoles: z.array(z.string().min(1, '角色ID不能为空')).nullish(),
+    removeRoles: z.array(z.string().min(1, 'Role ID cannot be empty')).nullish(),
   })
   .refine(
     (data) => {
-      // 至少要有一个操作（添加或移除）
+      // At least one operation (add or remove) must be specified
       return (
         (data.addRoles && data.addRoles.length > 0) ||
         (data.removeRoles && data.removeRoles.length > 0)
       );
     },
     {
-      message: '必须指定要添加或移除的角色',
+      message: 'At least one role to add or remove must be specified',
     },
   )
   .refine(
     (data) => {
-      // 检查添加和移除的角色之间不能有重复
+      // Check that there are no overlapping roles between add and remove lists
       if (!data.addRoles || !data.removeRoles) return true;
 
       const addRoleIds = data.addRoles.map((r) => r.roleId);
@@ -145,19 +146,19 @@ export const UpdateUserRolesRequestSchema = z
       return overlap.length === 0;
     },
     {
-      message: '不能同时添加和移除同一个角色',
+      message: 'Cannot add and remove the same role simultaneously',
     },
   );
 
 /**
- * 用户角色详情，包含角色信息和关联信息
+ * User role detail, including role info and association info
  */
 export interface UserRoleDetail extends UserRoleItem {
-  role: RoleItem;
+  role: PublicRole;
 }
 
 /**
- * 用户角色操作响应
+ * User role operation response
  */
 export type UserRolesResponse = {
   expiresAt?: Date | null;
@@ -167,7 +168,7 @@ export type UserRolesResponse = {
 }[];
 
 /**
- * 用户角色操作结果
+ * User role operation result
  */
 export interface UserRoleOperationResult {
   added: number;
@@ -178,5 +179,5 @@ export interface UserRoleOperationResult {
 // ==================== Common Schemas ====================
 
 export const UserIdParamSchema = z.object({
-  id: z.string().min(1, '用户ID不能为空'),
+  id: z.string().min(1, 'User ID cannot be empty'),
 });

@@ -1,105 +1,50 @@
-/**
- * Load positions for Agent Documents in the context pipeline
- */
-export enum DocumentLoadPosition {
-  AFTER_FIRST_USER = 'after-first-user',
-  AFTER_KNOWLEDGE = 'after-knowledge',
-  BEFORE_FIRST_USER = 'before-first-user',
-  BEFORE_KNOWLEDGE = 'before-knowledge',
-  BEFORE_SYSTEM = 'before-system',
-  CONTEXT_END = 'context-end',
-  MANUAL = 'manual',
-  ON_DEMAND = 'on-demand',
-  SYSTEM_APPEND = 'system-append',
-  SYSTEM_REPLACE = 'system-replace',
-}
+// Re-export all types from @lobechat/agent-templates for backward compatibility
+
+// Runtime values (enums, consts)
+// Database-specific types that remain here
+
+import type {
+  AgentDocumentPolicy,
+  DocumentLoadFormat,
+  DocumentLoadPosition as DocumentLoadPositionType,
+  DocumentLoadRules,
+  PolicyLoad,
+} from '@lobechat/agent-templates';
+
+export {
+  AgentAccess,
+  AutoLoadAccess,
+  DocumentLoadFormat,
+  DocumentLoadPosition,
+  DocumentLoadRule,
+  PolicyLoad,
+} from '@lobechat/agent-templates';
+
+// Type-only exports (interfaces)
+export type { AgentDocumentPolicy, DocumentLoadRules } from '@lobechat/agent-templates';
+
+export type AgentDocumentSourceType = 'file' | 'web' | 'api' | 'topic' | 'agent' | 'agent-signal';
+export type AgentDocumentListSourceType = 'all' | 'file' | 'web';
 
 /**
- * Plain text agent documents are always loadable by default.
+ * UI-facing tab grouping for an agent document. Derived from `fileType` +
+ * `sourceType` + `templateId` server-side so the client never has to
+ * categorize itself.
  */
-export enum DocumentLoadRule {
-  ALWAYS = 'always',
-  BY_KEYWORDS = 'by-keywords',
-  BY_REGEXP = 'by-regexp',
-  BY_TIME_RANGE = 'by-time-range',
-}
+export type AgentDocumentCategory = 'skill' | 'document' | 'web';
 
 /**
- * Render format for injected agent document content.
+ * Fields the server computes from the raw row and attaches to every agent
+ * document response. Keeps UI predicates out of the frontend.
  */
-export enum DocumentLoadFormat {
-  FILE = 'file',
-  RAW = 'raw',
-}
-
-/**
- * Policy load behavior for injection pipeline.
- */
-export enum PolicyLoad {
-  ALWAYS = 'always',
-  DISABLED = 'disabled',
-}
-
-/**
- * @deprecated use PolicyLoad.
- */
-export const AutoLoadAccess = PolicyLoad;
-
-/**
- * Agent capability bitmask.
- */
-export enum AgentAccess {
-  EXECUTE = 1,
-  READ = 2,
-  WRITE = 4,
-  LIST = 8,
-  DELETE = 16,
-}
-
-/**
- * Minimal load options for plain text documents.
- */
-export interface DocumentLoadRules {
-  keywordMatchMode?: 'all' | 'any';
-  keywords?: string[];
-  maxTokens?: number;
-  priority?: number;
-  regexp?: string;
-  rule?: DocumentLoadRule;
-  timeRange?: {
-    from?: string;
-    to?: string;
-  };
-}
-
-/**
- * Behavior policy for runtime rendering/retrieval.
- * Extensible by design for future context/retrieval strategies.
- */
-export interface AgentDocumentPolicy {
-  [key: string]: any;
-  context?: {
-    keywordMatchMode?: 'all' | 'any';
-    keywords?: string[];
-    policyLoadFormat?: DocumentLoadFormat;
-    maxTokens?: number;
-    mode?: 'append' | 'replace';
-    position?: DocumentLoadPosition;
-    priority?: number;
-    regexp?: string;
-    rule?: DocumentLoadRule;
-    timeRange?: {
-      from?: string;
-      to?: string;
-    };
-    [key: string]: any;
-  };
-  retrieval?: {
-    importance?: number;
-    recencyWeight?: number;
-    searchPriority?: number;
-    [key: string]: any;
-  };
+export interface AgentDocumentDerivedFields {
+  category: AgentDocumentCategory;
+  /** Folder (`custom/folder`) or skill bundle — anything that can contain children. */
+  isFolder: boolean;
+  /** Top-level skill folder (`fileType === 'skills/bundle'`). */
+  isSkillBundle: boolean;
+  /** The `SKILL.md` index document inside a bundle (`fileType === 'skills/index'`). */
+  isSkillIndex: boolean;
 }
 
 export interface AgentDocument {
@@ -115,22 +60,89 @@ export interface AgentDocument {
   deleteReason: string | null;
   description: string | null;
   documentId: string;
+  editorData: Record<string, any> | null;
   filename: string;
+  fileType: string;
   id: string;
   metadata: Record<string, any> | null;
+  parentId: string | null;
   policy: AgentDocumentPolicy | null;
   policyLoad: PolicyLoad;
   policyLoadFormat: DocumentLoadFormat;
   policyLoadPosition: string;
   policyLoadRule: string;
+  source: string | null;
+  sourceType: AgentDocumentSourceType;
   templateId: string | null;
   title: string;
   updatedAt: Date;
   userId: string;
 }
 
-export interface AgentDocumentWithRules extends AgentDocument {
+export interface AgentDocumentWithRules extends AgentDocument, AgentDocumentDerivedFields {
   loadRules: DocumentLoadRules;
+}
+
+/** A document-tree entry with its optional original uploaded file. */
+export interface AgentDocumentListItem extends AgentDocumentDerivedFields {
+  description: string | null;
+  documentId: string;
+  /** Original file to preview; absent for editable agent documents. */
+  fileId?: string | null;
+  filename: string;
+  fileType: string;
+  id: string;
+  loadPosition: DocumentLoadPositionType | undefined;
+  parentId: string | null;
+  sourceType: AgentDocumentSourceType;
+  templateId: string | null;
+  title: string;
+  updatedAt: Date;
+}
+
+export interface AgentDocumentContextRow extends AgentDocumentDerivedFields {
+  content: string;
+  contentCharCount?: number;
+  createdAt?: Date;
+  description: string | null;
+  documentId: string;
+  editorData: Record<string, any> | null;
+  filename: string;
+  fileType: string;
+  id: string;
+  loadRules: DocumentLoadRules;
+  parentId: string | null;
+  policy: AgentDocumentPolicy | null;
+  policyLoad: PolicyLoad;
+  policyLoadFormat: DocumentLoadFormat;
+  policyLoadPosition: string;
+  policyLoadRule: string;
+  sourceType: AgentDocumentSourceType;
+  templateId: string | null;
+  title: string;
+  updatedAt: Date;
+}
+
+export interface AgentDocumentContextPayload {
+  content: string;
+  contentCharCount?: number;
+  createdAt?: Date;
+  description: string | null;
+  documentId: string;
+  filename: string;
+  fileType: string;
+  id: string;
+  isFolder: boolean;
+  loadRules: DocumentLoadRules;
+  parentId: string | null;
+  policy: AgentDocumentPolicy | null;
+  policyLoad: PolicyLoad;
+  policyLoadFormat: DocumentLoadFormat;
+  policyLoadPosition: string;
+  sourceType: AgentDocumentSourceType;
+  templateId: string | null;
+  title: string;
+  updatedAt: Date;
 }
 
 export interface ToolUpdateLoadRule {
@@ -138,7 +150,7 @@ export interface ToolUpdateLoadRule {
   keywords?: string[];
   maxDocuments?: number;
   maxTokens?: number;
-  mode?: 'always' | 'manual' | 'on-demand';
+  mode?: 'always' | 'manual' | 'on-demand' | 'progressive';
   pinnedDocumentIds?: string[];
   policyLoadFormat?: 'file' | 'raw';
   priority?: number;

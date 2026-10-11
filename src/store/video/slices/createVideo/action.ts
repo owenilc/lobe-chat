@@ -1,35 +1,84 @@
-import { ENABLE_BUSINESS_FEATURES } from '@lobechat/business-const';
+import { toast } from '@lobehub/ui/base-ui';
 import { t } from 'i18next';
-import { type StateCreator } from 'zustand';
+import { type RuntimeVideoGenParams, type RuntimeVideoGenParamsKeys } from 'model-bank';
 
-import { markUserValidAction } from '@/business/client/markUserValidAction';
-import { message } from '@/components/AntdStaticMethods';
+import { handleGenerationPromptModerationError } from '@/business/client/handleGenerationPromptModerationError';
+import { handleLobeHubModelDeprecatedError } from '@/business/client/handleLobeHubModelDeprecatedError';
 import { videoService } from '@/services/video';
+import { type StoreSetter } from '@/store/types';
+import { preserveSupportedParams } from '@/store/utils/preserveSupportedParams';
+import { type GenerationConfig } from '@/types/generation';
 
 import { type VideoStore } from '../../store';
 import { generationBatchSelectors } from '../generationBatch/selectors';
+import { getVideoModelAndDefaults } from '../generationConfig/action';
 import { videoGenerationConfigSelectors } from '../generationConfig/selectors';
 import { generationTopicSelectors } from '../generationTopic';
+import type { VideoEditingDraftSnapshot } from './initialState';
 
-// ====== action interface ====== //
+type Setter = StoreSetter<VideoStore>;
 
-export interface CreateVideoAction {
-  createVideo: () => Promise<void>;
-  recreateVideo: (generationBatchId: string) => Promise<void>;
+interface StartEditingVideoParams {
+  generationId: string;
+  model: string;
+  provider: string;
+  sourceParameters?: GenerationConfig;
 }
 
-// ====== action implementation ====== //
+const EDIT_INPUT_PARAMETER_KEYS = new Set([
+  'endImageUrl',
+  'imageUrl',
+  'imageUrls',
+  'prompt',
+  'task',
+]);
 
-export const createCreateVideoSlice: StateCreator<
-  VideoStore,
-  [['zustand/devtools', never]],
-  [],
-  CreateVideoAction
-> = (set, get) => ({
-  async createVideo() {
-    set({ isCreating: true }, false, 'createVideo/startCreateVideo');
+const cloneEditingDraft = (store: VideoStore): VideoEditingDraftSnapshot => ({
+  model: store.model,
+  parameters: {
+    ...store.parameters,
+    ...(store.parameters.imageUrls ? { imageUrls: [...store.parameters.imageUrls] } : {}),
+  },
+  parametersSchema: store.parametersSchema,
+  provider: store.provider,
+  uploadingImagePreviews: [...store.uploadingImagePreviews],
+});
 
-    const store = get();
+const restoreEditingDraft = (state: VideoStore) => {
+  const snapshot = state.editingDraftSnapshot;
+
+  if (!snapshot) {
+    return { editingDraftSnapshot: undefined, editingGenerationId: undefined };
+  }
+
+  return {
+    editingDraftSnapshot: undefined,
+    editingGenerationId: undefined,
+    model: snapshot.model,
+    parameters: snapshot.parameters,
+    parametersSchema: snapshot.parametersSchema,
+    provider: snapshot.provider,
+    uploadingImagePreviews: snapshot.uploadingImagePreviews,
+  };
+};
+
+export const createCreateVideoSlice = (set: Setter, get: () => VideoStore, _api?: unknown) =>
+  new CreateVideoActionImpl(set, get, _api);
+
+export class CreateVideoActionImpl {
+  readonly #get: () => VideoStore;
+  readonly #set: Setter;
+
+  constructor(set: Setter, get: () => VideoStore, _api?: unknown) {
+    void _api;
+    this.#set = set;
+    this.#get = get;
+  }
+
+  createVideo = async (): Promise<void> => {
+    this.#set({ isCreating: true }, false, 'createVideo/startCreateVideo');
+
+    const store = this.#get();
     const parameters = videoGenerationConfigSelectors.parameters(store);
     const provider = videoGenerationConfigSelectors.provider(store);
     const model = videoGenerationConfigSelectors.model(store);
@@ -52,13 +101,14 @@ export const createCreateVideoSlice: StateCreator<
       'requiresImageUrl' in endImageUrlSchema &&
       endImageUrlSchema.requiresImageUrl &&
       parameters.endImageUrl &&
-      !parameters.imageUrl
+      !parameters.imageUrl &&
+      !parameters.imageUrls?.length
     ) {
-      message.warning({
-        content: t('generation.validation.endFrameRequiresStartFrame', { ns: 'video' }),
-        duration: 3,
+      toast.warning({
+        description: t('generation.validation.endFrameRequiresStartFrame', { ns: 'video' }),
+        duration: 3000,
       });
-      set({ isCreating: false }, false, 'createVideo/endCreateVideo');
+      this.#set({ isCreating: false }, false, 'createVideo/endCreateVideo');
       return;
     }
 
@@ -84,11 +134,11 @@ export const createCreateVideoSlice: StateCreator<
     try {
       // 3. If it's a new topic, set the creating state after topic creation
       if (isNewTopic) {
-        set({ isCreatingWithNewTopic: true }, false, 'createVideo/startCreateVideoWithNewTopic');
-      }
-
-      if (ENABLE_BUSINESS_FEATURES) {
-        markUserValidAction();
+        this.#set(
+          { isCreatingWithNewTopic: true },
+          false,
+          'createVideo/startCreateVideoWithNewTopic',
+        );
       }
 
       // 4. Create video via service
@@ -96,40 +146,50 @@ export const createCreateVideoSlice: StateCreator<
         generationTopicId: finalTopicId!,
         model,
         params: parameters as any,
+        previousGenerationId: store.editingGenerationId,
         provider,
       });
 
       // 5. Refresh generation batches to show the new batch
       if (!isNewTopic) {
-        await get().refreshGenerationBatches();
+        await this.#get().refreshGenerationBatches();
       }
 
-      // 6. Clear the prompt input after successful video creation
-      set(
-        (state) => ({
-          parameters: { ...state.parameters, prompt: '' },
-        }),
+      // 6. Restore the original draft after an edit, or clear a regular generation prompt
+      this.#set(
+        (state) =>
+          state.editingGenerationId
+            ? restoreEditingDraft(state)
+            : { parameters: { ...state.parameters, prompt: '' } },
         false,
         'createVideo/clearPrompt',
       );
+    } catch (error) {
+      handleGenerationPromptModerationError(error);
+      handleLobeHubModelDeprecatedError(error);
+      throw error;
     } finally {
       // 7. Reset all creating states
       if (isNewTopic) {
-        set(
+        this.#set(
           { isCreating: false, isCreatingWithNewTopic: false },
           false,
           'createVideo/endCreateVideoWithNewTopic',
         );
       } else {
-        set({ isCreating: false }, false, 'createVideo/endCreateVideo');
+        this.#set({ isCreating: false }, false, 'createVideo/endCreateVideo');
       }
     }
-  },
+  };
 
-  async recreateVideo(generationBatchId: string) {
-    set({ isCreating: true }, false, 'recreateVideo/start');
+  cancelEditingVideo = (): void => {
+    this.#set((state) => restoreEditingDraft(state), false, 'cancelEditingVideo');
+  };
 
-    const store = get();
+  recreateVideo = async (generationBatchId: string): Promise<void> => {
+    this.#set({ isCreating: true }, false, 'recreateVideo/start');
+
+    const store = this.#get();
     const activeGenerationTopicId = generationTopicSelectors.activeGenerationTopicId(store);
     if (!activeGenerationTopicId) {
       throw new Error('No active generation topic');
@@ -149,8 +209,55 @@ export const createCreateVideoSlice: StateCreator<
       });
 
       await store.refreshGenerationBatches();
+    } catch (error) {
+      handleGenerationPromptModerationError(error);
+      handleLobeHubModelDeprecatedError(error);
+      throw error;
     } finally {
-      set({ isCreating: false }, false, 'recreateVideo/end');
+      this.#set({ isCreating: false }, false, 'recreateVideo/end');
     }
-  },
-});
+  };
+
+  startEditingVideo = ({
+    generationId,
+    model,
+    provider,
+    sourceParameters,
+  }: StartEditingVideoParams): void => {
+    const store = this.#get();
+    const { defaultValues, parametersSchema } = getVideoModelAndDefaults(model, provider);
+    // Carry the source video's settings over, but not its prompt or input media.
+    const carriedKeys = Object.keys(parametersSchema).filter(
+      (key) => !EDIT_INPUT_PARAMETER_KEYS.has(key),
+    ) as RuntimeVideoGenParamsKeys[];
+    const parameters = preserveSupportedParams(
+      (sourceParameters ?? {}) as RuntimeVideoGenParams,
+      defaultValues,
+      parametersSchema,
+      carriedKeys,
+    );
+
+    this.#set(
+      {
+        editingDraftSnapshot: store.editingDraftSnapshot ?? cloneEditingDraft(store),
+        editingGenerationId: generationId,
+        model,
+        /**
+         * Switching from one edit source to another keeps the typed instruction: it is
+         * usually still what the user wants, and clearing it would silently lose input.
+         */
+        parameters: {
+          ...parameters,
+          prompt: store.editingGenerationId ? store.parameters.prompt : '',
+        },
+        parametersSchema,
+        provider,
+        uploadingImagePreviews: [],
+      },
+      false,
+      `startEditingVideo/${generationId}`,
+    );
+  };
+}
+
+export type CreateVideoAction = Pick<CreateVideoActionImpl, keyof CreateVideoActionImpl>;

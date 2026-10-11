@@ -5,8 +5,18 @@
  * The NotebookService is injected via constructor so both client and server can provide their own implementation.
  *
  * Note: listDocuments is not exposed as a tool - it's automatically injected by the system.
+ *
+ * @deprecated The notebook tool is no longer injected into the LLM tools
+ * engine. This executor is retained so that legacy tool-call messages can
+ * still resolve on execution. New flows should use
+ * `@lobechat/builtin-tool-agent-documents`.
  */
-import { BaseExecutor, type BuiltinToolContext, type BuiltinToolResult } from '@lobechat/types';
+import {
+  BaseExecutor,
+  type BuiltinToolContext,
+  type BuiltinToolResult,
+  type ToolAfterCallContext,
+} from '@lobechat/types';
 
 import {
   type CreateDocumentArgs,
@@ -40,16 +50,39 @@ export interface NotebookServiceApi {
   updateDocument: (params: UpdateDocumentParams) => Promise<any>;
 }
 
+export interface NotebookExecutorOptions {
+  onDocumentsMutated?: (params: { documentId?: string; topicId?: string }) => void | Promise<void>;
+}
+
 export class NotebookExecutor extends BaseExecutor<typeof NotebookApiName> {
   readonly identifier = NotebookIdentifier;
   protected readonly apiEnum = NotebookApiName;
 
   private notebookService: NotebookServiceApi;
+  private options: NotebookExecutorOptions;
 
-  constructor(notebookService: NotebookServiceApi) {
+  constructor(notebookService: NotebookServiceApi, options: NotebookExecutorOptions = {}) {
     super();
     this.notebookService = notebookService;
+    this.options = options;
   }
+
+  // Fires on `tool_end` for client- and server-run calls alike, so the host can
+  // revalidate the topic list and, for an existing row, the open editor.
+  onAfterCall = async ({ apiName, result, topicId }: ToolAfterCallContext): Promise<void> => {
+    if (!result.success) return;
+
+    if (apiName === NotebookApiName.createDocument || apiName === NotebookApiName.deleteDocument) {
+      await this.options.onDocumentsMutated?.({ topicId });
+      return;
+    }
+
+    if (apiName !== NotebookApiName.updateDocument) return;
+
+    const state = result.state as { document?: { id?: unknown } } | undefined;
+    const documentId = typeof state?.document?.id === 'string' ? state.document.id : undefined;
+    await this.options.onDocumentsMutated?.({ documentId, topicId });
+  };
 
   /**
    * Create a new document

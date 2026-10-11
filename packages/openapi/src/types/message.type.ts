@@ -1,10 +1,14 @@
-import type { DBMessageItem, FileItem } from '@lobechat/types';
 import { z } from 'zod';
 
-import type { SessionItem, TopicItem } from '@/database/schemas';
-
+import type {
+  PublicFile,
+  PublicMessage,
+  PublicSession,
+  PublicTopic,
+} from '../helpers/public-fields';
 import type { IPaginationQuery, PaginationQueryResponse } from './common.type';
 import { PaginationQuerySchema } from './common.type';
+import { EvalPaginationSchema } from './eval-resource.type';
 
 // ==================== Message Query Types ====================
 
@@ -13,21 +17,25 @@ export interface MessagesQueryByTopicRequest {
 }
 
 export const MessagesQueryByTopicRequestSchema = z.object({
-  topicId: z.string().min(1, '话题ID不能为空'),
+  topicId: z.string().min(1, 'Topic ID cannot be empty'),
 });
 
 /**
- * 消息数量统计查询参数
+ * Message count statistics query parameters
  */
 export interface MessagesCountQuery {
+  threadId?: string;
+  topicId?: string;
   topicIds?: string[];
   userId?: string;
 }
 
 export const MessagesCountQuerySchema = z.object({
-  // 按话题ID数组统计 (comma-separated string, e.g., "topic1,topic2,topic3")
+  topicId: z.string().min(1).optional(),
+  threadId: z.string().min(1).optional(),
+  // Count by topic ID array (comma-separated string, e.g., "topic1,topic2,topic3")
   topicIds: z.string().nullish(),
-  // 按用户ID统计 (仅管理员)
+  // Count by user ID (admin only)
   userId: z.string().nullish(),
 });
 
@@ -36,7 +44,7 @@ export interface CountByTopicsRequest {
 }
 
 export const CountByTopicsRequestSchema = z.object({
-  topicIds: z.array(z.string()).min(1, '话题ID数组不能为空'),
+  topicIds: z.array(z.string()).min(1, 'Topic ID array cannot be empty'),
 });
 
 export interface CountByUserRequest {
@@ -44,30 +52,35 @@ export interface CountByUserRequest {
 }
 
 export const CountByUserRequestSchema = z.object({
-  userId: z.string().min(1, '用户ID不能为空'),
+  userId: z.string().min(1, 'User ID cannot be empty'),
 });
 
 // ==================== Message List Query Types ====================
 
 /**
- * 消息列表查询参数
+ * Message list query parameters
  */
 export interface MessagesListQuery extends IPaginationQuery {
+  limit?: number;
+  offset?: number;
   role?: 'user' | 'system' | 'assistant' | 'tool';
+  threadId?: string;
   topicId?: string;
   userId?: string;
 }
 
 export const MessagesListQuerySchema = z
   .object({
-    // 过滤参数
+    threadId: z.string().min(1).optional(),
+    // Filter parameters
     topicId: z.string().nullish(),
     userId: z.string().nullish(),
     role: z.enum(['user', 'system', 'assistant', 'tool']).nullish(),
   })
   .extend(PaginationQuerySchema.shape)
+  .extend(EvalPaginationSchema.shape)
   .refine((data) => Boolean(data.topicId || data.userId), {
-    message: '至少需要提供一个过滤参数：topicId 或 userId',
+    message: 'At least one filter parameter must be provided: topicId or userId',
   });
 
 // ==================== Message Search Types ====================
@@ -79,7 +92,7 @@ export interface SearchMessagesByKeywordRequest {
 }
 
 export const SearchMessagesByKeywordRequestSchema = z.object({
-  keyword: z.string().min(1, '搜索关键词不能为空'),
+  keyword: z.string().min(1, 'Search keyword cannot be empty'),
   limit: z.number().min(1).max(100).nullish().default(20),
   offset: z.number().min(0).nullish().default(0),
 });
@@ -88,22 +101,22 @@ export const SearchMessagesByKeywordRequestSchema = z.object({
 
 export interface MessagesCreateRequest {
   agentId?: string | null;
-  // 客户端标识
+  // Client identifier
   clientId?: string;
 
   content: string;
-  // 状态
+  // Status
   favorite?: boolean;
 
-  // 文件关联
+  // File association
   files?: string[];
-  // 扩展数据
+  // Extended data
   metadata?: any;
-  // AI相关字段
+  // AI-related fields
   model?: string;
 
   observationId?: string | null;
-  // 消息关联
+  // Message association
   parentId?: string | null;
   provider?: string;
 
@@ -117,48 +130,48 @@ export interface MessagesCreateRequest {
 
   topicId: string | null;
 
-  // 追踪标识
+  // Tracking identifier
   traceId?: string | null;
 }
 
 export const MessagesCreateRequestSchema = z.object({
-  content: z.string().min(1, '消息内容不能为空'),
-  role: z.enum(['user', 'system', 'assistant', 'tool'], { required_error: '角色类型无效' }),
+  content: z.string().min(1, 'Message content cannot be empty'),
+  role: z.enum(['user', 'system', 'assistant', 'tool'], { error: 'Invalid role type' }),
 
-  // AI相关字段
-  model: z.string().nullish(), // 使用的模型
-  provider: z.string().nullish(), // 提供商
+  // AI-related fields
+  model: z.string().nullish(), // Model used
+  provider: z.string().nullish(), // Provider
 
   topicId: z.string().nullable().nullish(),
   threadId: z.string().nullable().nullish(),
 
-  // 消息关联
-  parentId: z.string().nullable().nullish(), // 父消息ID
-  quotaId: z.string().nullable().nullish(), // 引用消息ID
-  agentId: z.string().nullable().nullish(), // 关联的Agent ID
+  // Message association
+  parentId: z.string().nullable().nullish(), // Parent message ID
+  quotaId: z.string().nullable().nullish(), // Quoted message ID
+  agentId: z.string().nullable().nullish(), // Associated Agent ID
 
-  // 客户端标识
-  clientId: z.string().nullish(), // 客户端ID，用于跨设备同步
+  // Client identifier
+  clientId: z.string().nullish(), // Client ID, used for cross-device sync
 
-  // 扩展数据
-  metadata: z.any().nullish(), // 元数据
-  reasoning: z.any().nullish(), // 推理过程
-  search: z.any().nullish(), // 搜索结果
-  tools: z.any().nullish(), // 工具调用
+  // Extended data
+  metadata: z.any().nullish(), // Metadata
+  reasoning: z.any().nullish(), // Reasoning process
+  search: z.any().nullish(), // Search results
+  tools: z.any().nullish(), // Tool calls
 
-  // 追踪标识
-  traceId: z.string().nullable().nullish(), // 追踪ID
-  observationId: z.string().nullable().nullish(), // 观测ID
+  // Tracking identifier
+  traceId: z.string().nullable().nullish(), // Trace ID
+  observationId: z.string().nullable().nullish(), // Observation ID
 
-  // 文件关联
-  files: z.array(z.string()).nullish(), // 文件ID数组
+  // File association
+  files: z.array(z.string()).nullish(), // File ID array
 
-  // 状态
-  favorite: z.boolean().nullish().default(false), // 是否收藏
+  // Status
+  favorite: z.boolean().nullish().default(false), // Whether favorited
 });
 
 export const MessagesCreateWithReplyRequestSchema = MessagesCreateRequestSchema.extend({
-  role: z.literal('user', { errorMap: () => ({ message: '创建 AI 回复时 role 必须为 user' }) }),
+  role: z.literal('user', { error: 'Role must be user when creating an AI reply' }),
 });
 
 export type MessagesCreateWithReplyRequest = z.infer<typeof MessagesCreateWithReplyRequestSchema>;
@@ -174,7 +187,7 @@ export interface MessagesUpdateRequest {
 }
 
 export const MessagesUpdateRequestSchema = z.object({
-  content: z.string().min(1, '消息内容不能为空').nullish(),
+  content: z.string().min(1, 'Message content cannot be empty').nullish(),
   favorite: z.boolean().nullish(),
   metadata: z.any().nullish(),
   reasoning: z.any().nullish(),
@@ -190,7 +203,9 @@ export interface MessagesDeleteBatchRequest {
 }
 
 export const MessagesDeleteBatchRequestSchema = z.object({
-  messageIds: z.array(z.string().min(1, '消息ID不能为空')).min(1, '消息ID数组不能为空'),
+  messageIds: z
+    .array(z.string().min(1, 'Message ID cannot be empty'))
+    .min(1, 'Message ID array cannot be empty'),
 });
 
 // ==================== Message Response Types ====================
@@ -199,16 +214,16 @@ export interface MessageIdParam {
   id: string;
 }
 
-// 从数据库联表查询出来的消息类型，包含关联的 session 和 topic 信息
-export interface MessageResponseFromDatabase extends DBMessageItem {
-  filesToMessages: { file: FileItem; messageId: string }[] | null;
-  session: SessionItem | null;
-  topic: TopicItem | null;
+// Message type queried from database join, includes associated session and topic info
+export interface MessageResponseFromDatabase extends PublicMessage {
+  filesToMessages: { file: PublicFile; messageId: string }[] | null;
+  session: PublicSession | null;
+  topic: PublicTopic | null;
 }
 
-// 消息查询时的返回类型，包含关联的 session 和 topic 信息
+// Return type for message query, includes associated session and topic info
 export interface MessageResponse extends Omit<MessageResponseFromDatabase, 'filesToMessages'> {
-  files: FileItem[] | null;
+  files: PublicFile[] | null;
 }
 
 export type MessageListResponse = PaginationQueryResponse<{
@@ -218,5 +233,5 @@ export type MessageListResponse = PaginationQueryResponse<{
 // ==================== Common Schemas ====================
 
 export const MessageIdParamSchema = z.object({
-  id: z.string().min(1, '消息ID不能为空'),
+  id: z.string().min(1, 'Message ID cannot be empty'),
 });
