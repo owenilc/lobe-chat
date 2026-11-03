@@ -74,6 +74,8 @@ export enum RequestTrigger {
   TopicTitle = 'topic_title',
   /** Translation of a chat message or a generation prompt, including language detection. */
   Translate = 'translate',
+  /** Text-to-speech synthesis, e.g. `lh generate tts`. */
+  Tts = 'tts',
   /** Acceptance verification: plan generation, judging, review prediction and reports. */
   Verify = 'verify',
   Video = 'video',
@@ -133,8 +135,7 @@ export interface AgentShareVisitorContext {
   skillGrants?: string[];
   /**
    * Mirrors `shareConfig.toolGrants` so tool runtimes that resolve their
-   * target outside `toolManifestMap` (e.g. `activateSkill`,
-   * `lobe-topic-reference`) can apply the same allowlist the assembled tool set
+   * target outside `toolManifestMap` (e.g. `activateSkill`) can apply the same allowlist the assembled tool set
    * already enforces.
    */
   toolGrants?: AgentShareToolGrant[];
